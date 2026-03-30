@@ -237,13 +237,7 @@ async def qbo_callback(request: Request):
             ocr_engine.qbo.refresh_token = refresh_token
             ocr_engine.qbo.realm_id      = realm_id
 
-        return JSONResponse(content={
-            "message":  "✅ QBO tokens saved successfully! You can close this tab.",
-            "realm_id": realm_id,
-            "token_type": tokens.get("token_type"),
-            "expires_in": tokens.get("expires_in"),
-            "x_refresh_token_expires_in": tokens.get("x_refresh_token_expires_in"),
-        })
+        return RedirectResponse(url="/static/auth_success.html")
 
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Token exchange failed: {str(e)}"})

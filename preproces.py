@@ -21,6 +21,8 @@ def show_wait_destroy(winname, img):
 
 #Functon for preprocessing
 def process(img_path):
+
+    
     print("*"*50)
     print("------Reading image--------")
     img = cv2.imread(str(img_path), 0)  # Read the image

@@ -55,7 +55,7 @@ class GoogleSheetsService:
         try:
             # Check first row
             result = self.sheet.values().get(
-                spreadsheetId=self.spreadsheet_id, range=f"{sheet_name}!A1:X1"
+                spreadsheetId=self.spreadsheet_id, range=f"{sheet_name}!A1:AA1"
             ).execute()
             values = result.get('values', [])
             
@@ -189,8 +189,8 @@ class GoogleSheetsService:
             return False
             
         try:
-            # Status is Column R (18th column)
-            range_name = f"Invoices!R{row_num}"
+            # Status is Column V (22nd column)
+            range_name = f"Invoices!V{row_num}"
             body = {'values': [[status]]}
             self.sheet.values().update(
                 spreadsheetId=self.spreadsheet_id, range=range_name,
@@ -198,8 +198,8 @@ class GoogleSheetsService:
             ).execute()
             
             if qb_transaction_id:
-                # QB ID is Column S (19th column)
-                range_id = f"Invoices!S{row_num}"
+                # QB ID is Column W (23rd column)
+                range_id = f"Invoices!W{row_num}"
                 body_id = {'values': [[qb_transaction_id]]}
                 self.sheet.values().update(
                     spreadsheetId=self.spreadsheet_id, range=range_id,
@@ -282,9 +282,9 @@ class GoogleSheetsService:
     def check_duplicate(self, invoice_number: str, supplier_name: str) -> bool:
         """Check if invoice already exists in sheet"""
         try:
-             # Read columns E (Supplier) and G (Invoice No)
+             # Read columns F (Supplier Name) and H (Invoice No)
             result = self.sheet.values().get(
-                spreadsheetId=self.spreadsheet_id, range="Invoices!E:G"
+                spreadsheetId=self.spreadsheet_id, range="Invoices!F:H"
             ).execute()
             values = result.get('values', [])
             
@@ -292,8 +292,7 @@ class GoogleSheetsService:
                 return False
                 
             for row in values:
-                # Row format roughly: [Supplier, TRN, InvoiceNo] depends on range E:G
-                # E=0, F=1, G=2
+                # Range F:H means index 0 is F (Supplier), index 1 is G (TRN), index 2 is H (Invoice No)
                 if len(row) >= 3:
                     existing_supplier = row[0]
                     existing_invoice = row[2]

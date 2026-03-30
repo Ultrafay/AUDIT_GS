@@ -19,7 +19,7 @@ def convert_to_jpeg(pdf_path,output_folder):
 #Store if format is jpeg
 def in_jpeg(img_path,output_folder):
     img=cv2.imread(img_path)
-    join= 'page'+str(i)+'.jpg'
-    path= Path.joinpath(output_folder,join)
+    basename = Path(img_path).name
+    path= Path.joinpath(output_folder,basename)
     cv2.imwrite(str(path),img)
 

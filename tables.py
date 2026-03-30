@@ -17,6 +17,11 @@ def get_data():
     vert= cv2.imread(str(Path.joinpath(path_to_read,'verticle_lines.jpg')))
     horzt= cv2.imread(str(Path.joinpath(path_to_read,'horizontal_lines.jpg')))
     actual=cv2.imread(str(Path.joinpath(path_to_read,'Image_bin.jpg')))
+    # Check if images loaded correctly
+    if vert is None or horzt is None or actual is None:
+         print("Error reading intermediate images in tables.py")
+         return np.array([])
+
     actual =cv2.bitwise_not(actual,mask=None)
     ar= np.array(vert)
     ahr= np.array(horzt)
@@ -112,9 +117,13 @@ def get_data():
                 r= Path.joinpath(path_to_write,"Rows")
                 im_no="row_"+str(rw)+"_col_"+str(j)+'.jpg'
                 cv2.imwrite(str(Path.joinpath(r,im_no)),img)
-                custom_config = r"--oem 3 --psm 6"
+                custom_config = r"-psm 6"
                 # pytesseract.run_tesseract("rows/row"+str(m)+".jpg","output_hocr1",extension='jpg', lang=None,config=custom_config)
-                txt= pytesseract.image_to_string(img, lang=None,config=custom_config)
+                try:
+                    txt= pytesseract.image_to_string(img, lang=None,config=custom_config)
+                except Exception as e:
+                    print(f"OCR Error in table cell: {e}")
+                    txt = ""
                 text.append(txt)
             rw+=1
             tables.append(text)
@@ -132,14 +141,20 @@ def get_data():
                 im_no="row_"+str(rw)+"_col_"+str(j)+'.jpg'
                 
                 cv2.imwrite(str(Path.joinpath(r,im_no)),img)
-                custom_config = r"--oem 3 --psm 6"
+                custom_config = r"-psm 6"
                 # pytesseract.run_tesseract("rows/row"+str(m)+".jpg","output_hocr1",extension='jpg', lang=None,config=custom_config)
-                txt= pytesseract.image_to_string(str(Path.joinpath(r,im_no)), lang=None,config=custom_config)
+                try:
+                    txt= pytesseract.image_to_string(str(Path.joinpath(r,im_no)), lang=None,config=custom_config)
+                except Exception as e:
+                    print(f"OCR Error in table cell: {e}")
+                    txt = ""
                 text.append(str(txt))
             rw+=1
             tables.append(text)
     
     #Pad with null values if not in proper format
+    if not tables:
+         return np.array([])
     wid= max([len(i) for i in tables])
     tables= pad(tables,wid,"NULL")
     return np.array(tables)

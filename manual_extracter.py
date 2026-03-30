@@ -25,7 +25,7 @@ def manual_extraction():
     imk=img.copy()
     imk= cv2.resize(imk,(int(imk.shape[1]/2),int(imk.shape[0]/2)))
     clone= img.copy()
-    custom_config = r"--oem 3 --psm 6"
+    custom_config = r"-psm 6"
     texts=[]
     def read(img):
         te=pytesseract.image_to_string(img,config=custom_config)

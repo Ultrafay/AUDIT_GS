@@ -225,17 +225,49 @@ async def qbo_callback(request: Request):
         access_token  = tokens["access_token"]
         refresh_token = tokens["refresh_token"]
 
-        # Save to .env automatically
-        env_path = str(Path(__file__).resolve().parent / ".env")
-        set_key(env_path, "QBO_ACCESS_TOKEN",  access_token)
-        set_key(env_path, "QBO_REFRESH_TOKEN", refresh_token)
-        set_key(env_path, "QBO_REALM_ID",      realm_id)
-
         # Also reload in the live qbo instance if available
         if ocr_engine.qbo:
-            ocr_engine.qbo.access_token  = access_token
-            ocr_engine.qbo.refresh_token = refresh_token
-            ocr_engine.qbo.realm_id      = realm_id
+            # Reusing the newly updated token persistence logic
+            ocr_engine.qbo._save_tokens(access_token, refresh_token, realm_id)
+        else:
+            # Fallback inline implementation if QBO service is not initialized
+            railway_token = os.getenv("RAILWAY_API_TOKEN")
+            service_id    = os.getenv("RAILWAY_SERVICE_ID")
+
+            if railway_token and service_id:
+                project_id = os.getenv("RAILWAY_PROJECT_ID")
+                environment_id = os.getenv("RAILWAY_ENVIRONMENT_ID")
+                url = "https://backboard.railway.com/graphql/v2"
+                headers = {
+                    "Authorization": f"Bearer {railway_token}",
+                    "Content-Type": "application/json"
+                }
+                payload = {
+                    "query": "mutation variableCollectionUpsert($input: VariableCollectionUpsertInput!) { variableCollectionUpsert(input: $input) }",
+                    "variables": {
+                        "input": {
+                            "projectId": project_id,
+                            "environmentId": environment_id,
+                            "serviceId": service_id,
+                            "variables": {
+                                "QBO_ACCESS_TOKEN": access_token,
+                                "QBO_REFRESH_TOKEN": refresh_token,
+                                "QBO_REALM_ID": realm_id
+                            }
+                        }
+                    }
+                }
+                try:
+                    resp = http_requests.post(url, headers=headers, json=payload, timeout=15)
+                    if resp.status_code == 405:
+                        http_requests.patch(url, headers=headers, json=payload, timeout=15)
+                except Exception as e:
+                    print(f"[QBO] Exception updating Railway vars: {e}")
+            else:
+                env_path = str(Path(__file__).resolve().parent / ".env")
+                set_key(env_path, "QBO_ACCESS_TOKEN",  access_token)
+                set_key(env_path, "QBO_REFRESH_TOKEN", refresh_token)
+                set_key(env_path, "QBO_REALM_ID",      realm_id)
 
         return RedirectResponse(url="/static/auth_success.html")
 
@@ -275,11 +307,41 @@ async def qbo_disconnect():
         )
         # Even if token is already expired/invalid, we want to clear locally
         
-        # Clear from .env
-        env_path = str(Path(__file__).resolve().parent / ".env")
-        set_key(env_path, "QBO_ACCESS_TOKEN",  "")
-        set_key(env_path, "QBO_REFRESH_TOKEN", "")
-        set_key(env_path, "QBO_REALM_ID",      "")
+        # Clear tokens via Railway API or .env
+        railway_token = os.getenv("RAILWAY_API_TOKEN")
+        service_id    = os.getenv("RAILWAY_SERVICE_ID")
+
+        if railway_token and service_id:
+            project_id = os.getenv("RAILWAY_PROJECT_ID")
+            environment_id = os.getenv("RAILWAY_ENVIRONMENT_ID")
+            url = "https://backboard.railway.com/graphql/v2"
+            headers = {"Authorization": f"Bearer {railway_token}", "Content-Type": "application/json"}
+            payload = {
+                "query": "mutation variableCollectionUpsert($input: VariableCollectionUpsertInput!) { variableCollectionUpsert(input: $input) }",
+                "variables": {
+                    "input": {
+                        "projectId": project_id,
+                        "environmentId": environment_id,
+                        "serviceId": service_id,
+                        "variables": {
+                            "QBO_ACCESS_TOKEN": "",
+                            "QBO_REFRESH_TOKEN": "",
+                            "QBO_REALM_ID": ""
+                        }
+                    }
+                }
+            }
+            try:
+                resp = http_requests.post(url, headers=headers, json=payload, timeout=15)
+                if resp.status_code == 405:
+                    http_requests.patch(url, headers=headers, json=payload, timeout=15)
+            except Exception as e:
+                print(f"[QBO] Exception clearing Railway vars: {e}")
+        else:
+            env_path = str(Path(__file__).resolve().parent / ".env")
+            set_key(env_path, "QBO_ACCESS_TOKEN",  "")
+            set_key(env_path, "QBO_REFRESH_TOKEN", "")
+            set_key(env_path, "QBO_REALM_ID",      "")
 
         # Clear from live instance
         if ocr_engine.qbo:

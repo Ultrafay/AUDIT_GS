@@ -59,7 +59,6 @@ class QuickBooksService:
         _project_root = Path(__file__).resolve().parent.parent  # services/ -> project root
         _explicit_env = _project_root / ".env"
         self._env_path = str(_explicit_env) if _explicit_env.exists() else (find_dotenv() or ".env")
-        self._cache_file = _project_root / "vendor_cache.json"
         print(f"[QBO] Token store: {self._env_path}")
 
         if not self.realm_id:
@@ -67,44 +66,114 @@ class QuickBooksService:
         if not self.client_id or not self.client_secret:
             raise ValueError("QBO_CLIENT_ID / QBO_CLIENT_SECRET not set in .env")
 
-        self.vendor_cache = self._load_vendor_cache()
         self.gl_cache = {}
         self.default_expense_account = None
         self._tax_rate_map = None   # name -> TaxCode ID, populated lazily
+        
+        # Build in-memory vendor cache from QBO
+        self.vendor_cache = self._build_vendor_cache()
+        
         print(f"[QBO] Initialized ({environment}) — realm: {self.realm_id} — cached vendors: {len(self.vendor_cache)}")
 
     # ── Vendor Cache ─────────────────────────────────────────────────────────
 
-    def _load_vendor_cache(self) -> dict:
-        """Load the local vendor mapping cache."""
-        if self._cache_file.exists():
-            try:
-                with open(self._cache_file, "r") as f:
-                    return json.load(f)
-            except Exception as e:
-                print(f"[QBO] Failed to load vendor cache: {e}")
-        return {}
+    def _build_vendor_cache(self) -> dict:
+        """Fetch active vendors from QBO to build initial in-memory cache."""
+        cache = {}
+        if not self.access_token:
+            return cache
+            
+        try:
+            # Query up to 1000 active vendors
+            query = "SELECT * FROM Vendor WHERE Active = true MAXRESULTS 1000"
+            resp = self._request("GET", "query", params={"query": query})
+            if resp.status_code == 200:
+                vendors = resp.json().get("QueryResponse", {}).get("Vendor", [])
+                for v in vendors:
+                    name_clean = v.get("DisplayName", "").lower().strip()
+                    if name_clean:
+                        cache[name_clean] = v.get("Id")
+                print(f"[QBO] Built in-memory vendor cache with {len(cache)} vendors.")
+            else:
+                print(f"[QBO] Failed to build vendor cache: {resp.status_code} - {resp.text[:200]}")
+        except Exception as e:
+            print(f"[QBO] Exception building vendor cache: {e}")
+        return cache
 
     def _save_vendor_cache(self) -> None:
-        """Save the local vendor mapping cache."""
-        try:
-            with open(self._cache_file, "w") as f:
-                json.dump(self.vendor_cache, f, indent=2)
-        except Exception as e:
-            print(f"[QBO] Failed to save vendor cache: {e}")
+        """No-op: vendor caching is exclusively in-memory now."""
+        pass
 
     # ── Token Management ─────────────────────────────────────────────────────
 
-    def _save_tokens(self, access_token: str, refresh_token: str) -> None:
-        """Persist refreshed tokens back to the .env file."""
+    def _save_tokens(self, access_token: str, refresh_token: str, realm_id: str = None) -> None:
+        """Persist refreshed tokens back to Railway or the .env file."""
         self.access_token  = access_token
         self.refresh_token = refresh_token
-        try:
-            set_key(self._env_path, "QBO_ACCESS_TOKEN",  access_token)
-            set_key(self._env_path, "QBO_REFRESH_TOKEN", refresh_token)
-            print("[QBO] Tokens refreshed and saved to .env")
-        except Exception as e:
-            print(f"[QBO] Warning: could not write tokens to .env: {e}")
+        if realm_id:
+            self.realm_id = realm_id
+
+        # Use Railway API if configured
+        railway_token = os.getenv("RAILWAY_API_TOKEN")
+        service_id    = os.getenv("RAILWAY_SERVICE_ID")
+
+        if railway_token and service_id:
+            project_id = os.getenv("RAILWAY_PROJECT_ID")
+            environment_id = os.getenv("RAILWAY_ENVIRONMENT_ID")
+            
+            headers = {
+                "Authorization": f"Bearer {railway_token}",
+                "Content-Type": "application/json"
+            }
+            variables = {
+                "QBO_ACCESS_TOKEN": access_token,
+                "QBO_REFRESH_TOKEN": refresh_token
+            }
+            
+            # Add realm_id to the update if available
+            current_realm = realm_id or getattr(self, "realm_id", None)
+            if current_realm:
+                variables["QBO_REALM_ID"] = current_realm
+
+            query = """
+            mutation variableCollectionUpsert($input: VariableCollectionUpsertInput!) {
+              variableCollectionUpsert(input: $input)
+            }
+            """
+            payload = {
+                "query": query,
+                "variables": {
+                    "input": {
+                        "projectId": project_id,
+                        "environmentId": environment_id,
+                        "serviceId": service_id,
+                        "variables": variables
+                    }
+                }
+            }
+            try:
+                # Railway GraphQL endpoint. The user specifically referenced backboard.railway.com/graphql/v2
+                url = "https://backboard.railway.com/graphql/v2"
+                resp = requests.post(url, headers=headers, json=payload, timeout=15)
+                # Fallback to PATCH if the user's specific request "PATCH" is enforced by some custom endpoint routing
+                if resp.status_code == 405:
+                    resp = requests.patch(url, headers=headers, json=payload, timeout=15)
+                    
+                if resp.ok:
+                    print("[QBO] Tokens refreshed and saved to Railway variables.")
+                else:
+                    print(f"[QBO] Railway variables update failed: {resp.text}")
+            except Exception as e:
+                print(f"[QBO] Exception updating Railway vars: {e}")
+        else:
+            try:
+                set_key(self._env_path, "QBO_ACCESS_TOKEN",  access_token)
+                set_key(self._env_path, "QBO_REFRESH_TOKEN", refresh_token)
+                if realm_id:
+                    set_key(self._env_path, "QBO_REALM_ID", realm_id)
+                print("[QBO] Tokens refreshed and saved to .env")
+            except Exception as e:
+                print(f"[QBO] Warning: could not write tokens to .env: {e}")
 
     def _do_refresh(self) -> bool:
         """POST to Intuit token endpoint using refresh_token grant."""

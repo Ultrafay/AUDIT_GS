@@ -330,6 +330,11 @@ async def qbo_callback(request: Request):
                 set_key(env_path, "QBO_REFRESH_TOKEN", refresh_token)
                 set_key(env_path, "QBO_REALM_ID",      realm_id)
 
+            # Keep process environment in sync
+            os.environ["QBO_ACCESS_TOKEN"]  = access_token
+            os.environ["QBO_REFRESH_TOKEN"] = refresh_token
+            os.environ["QBO_REALM_ID"]      = realm_id
+
         return RedirectResponse(url="/launch")
 
     except Exception as e:
@@ -341,6 +346,8 @@ async def qbo_disconnect():
     """
     Revokes the QBO tokens and clears them from .env and memory.
     """
+    print("[QBO] WARNING: QBO DISCONNECT triggered — all tokens will be cleared")
+
     client_id     = os.getenv("QBO_CLIENT_ID", "")
     client_secret = os.getenv("QBO_CLIENT_SECRET", "")
     refresh_token = os.getenv("QBO_REFRESH_TOKEN", "")

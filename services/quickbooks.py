@@ -113,6 +113,12 @@ class QuickBooksService:
         if realm_id:
             self.realm_id = realm_id
 
+        # Keep process environment in sync so os.getenv() always returns fresh tokens
+        os.environ["QBO_ACCESS_TOKEN"]  = access_token
+        os.environ["QBO_REFRESH_TOKEN"] = refresh_token
+        if realm_id:
+            os.environ["QBO_REALM_ID"] = realm_id
+
         # Use Railway API if configured
         railway_token = os.getenv("RAILWAY_API_TOKEN")
         service_id    = os.getenv("RAILWAY_SERVICE_ID")

@@ -52,7 +52,6 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        "https://sandbox-quickbooks.api.intuit.com",
         "https://quickbooks.api.intuit.com",
         "https://appcenter.intuit.com",
         "https://oauth.platform.intuit.com",

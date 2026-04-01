@@ -25,7 +25,7 @@ load_dotenv()
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-SANDBOX_BASE    = "https://sandbox-quickbooks.api.intuit.com"
+SANDBOX_BASE    = "https://quickbooks.api.intuit.com"
 PRODUCTION_BASE = "https://quickbooks.api.intuit.com"
 TOKEN_URL       = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer"
 

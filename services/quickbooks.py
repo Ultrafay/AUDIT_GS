@@ -158,8 +158,8 @@ class QuickBooksService:
                 }
             }
             try:
-                # Railway GraphQL endpoint. The user specifically referenced backboard.railway.com/graphql/v2
-                url = "https://backboard.railway.com/graphql/v2"
+                # Railway GraphQL endpoint. The user specifically referenced backboard.railway.com/graphql/v2 but Railway migrated to .app
+                url = "https://backboard.railway.app/graphql/v2"
                 resp = requests.post(url, headers=headers, json=payload, timeout=15)
                 # Fallback to PATCH if the user's specific request "PATCH" is enforced by some custom endpoint routing
                 if resp.status_code == 405:

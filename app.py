@@ -302,7 +302,7 @@ async def qbo_callback(request: Request):
             if railway_token and service_id:
                 project_id = os.getenv("RAILWAY_PROJECT_ID")
                 environment_id = os.getenv("RAILWAY_ENVIRONMENT_ID")
-                url = "https://backboard.railway.com/graphql/v2"
+                url = "https://backboard.railway.app/graphql/v2"
                 headers = {
                     "Authorization": f"Bearer {railway_token}",
                     "Content-Type": "application/json"
@@ -338,6 +338,30 @@ async def qbo_callback(request: Request):
             os.environ["QBO_ACCESS_TOKEN"]  = access_token
             os.environ["QBO_REFRESH_TOKEN"] = refresh_token
             os.environ["QBO_REALM_ID"]      = realm_id
+
+        # Clear caches for live instances to avoid mixing old company IDs
+        if ocr_engine.qbo:
+            ocr_engine.qbo.gl_cache = {}
+            ocr_engine.qbo.default_expense_account = None
+            ocr_engine.qbo._tax_rate_map = None
+            ocr_engine.qbo.vendor_cache = ocr_engine.qbo._build_vendor_cache()
+            
+        global drive_processor
+        if drive_processor:
+            if getattr(drive_processor, "qbo", None):
+                drive_processor.qbo.access_token = access_token
+                drive_processor.qbo.refresh_token = refresh_token
+                drive_processor.qbo.realm_id = realm_id
+                drive_processor.qbo.gl_cache = {}
+                drive_processor.qbo.default_expense_account = None
+                drive_processor.qbo._tax_rate_map = None
+                drive_processor.qbo.vendor_cache = drive_processor.qbo._build_vendor_cache()
+            else:
+                try:
+                    from services.quickbooks import QuickBooksService
+                    drive_processor.qbo = QuickBooksService()
+                except Exception as _e:
+                    print(f"[QBO] Could not init drive_processor QBO: {_e}")
 
         return RedirectResponse(url="/launch")
 
@@ -386,7 +410,7 @@ async def qbo_disconnect():
         if railway_token and service_id:
             project_id = os.getenv("RAILWAY_PROJECT_ID")
             environment_id = os.getenv("RAILWAY_ENVIRONMENT_ID")
-            url = "https://backboard.railway.com/graphql/v2"
+            url = "https://backboard.railway.app/graphql/v2"
             headers = {"Authorization": f"Bearer {railway_token}", "Content-Type": "application/json"}
             payload = {
                 "query": "mutation variableCollectionUpsert($input: VariableCollectionUpsertInput!) { variableCollectionUpsert(input: $input) }",
@@ -421,6 +445,13 @@ async def qbo_disconnect():
             ocr_engine.qbo.refresh_token = ""
             ocr_engine.qbo.realm_id      = ""
             ocr_engine.qbo.company       = "Disconnected"
+            
+        global drive_processor
+        if drive_processor and getattr(drive_processor, "qbo", None):
+            drive_processor.qbo.access_token  = ""
+            drive_processor.qbo.refresh_token = ""
+            drive_processor.qbo.realm_id      = ""
+            drive_processor.qbo.company       = "Disconnected"
             
         return JSONResponse(content={"message": "Successfully disconnected from QuickBooks"})
 

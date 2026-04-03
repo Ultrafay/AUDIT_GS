@@ -796,14 +796,10 @@ class QuickBooksService:
                 )
             print(f"[QBO] Using GL account: {gl_account_ref}")
 
-            # ── Tax ───────────────────────────────────────────────
-            vat_amount = float(invoice_data.get("vat_amount", 0.0) or 0.0)
-            is_uae = invoice_data.get("is_uae_invoice", False)
-            apply_global_tax = invoice_data.get("apply_global_tax", False)
+            # ── Per-line tax codes ────────────────────────────────
+            # Each line item already has `qbo_tax_code` set by the VAT
+            # processor.  We just resolve it to a QBO TaxCodeRef here.
             location_cat = invoice_data.get("supplier_location_category", "Unknown")
-
-            # Default tax code for lines without a specific qbo_tax_code
-            default_tax_name = "ZR Zero Rated"
 
             qbo_lines = []
             for i, item in enumerate(line_items, start=1):
@@ -811,8 +807,7 @@ class QuickBooksService:
                 if item_amount <= 0:
                     continue
 
-                # Per-line tax code from vat_processor, or default
-                line_tax_name = item.get("qbo_tax_code", default_tax_name)
+                line_tax_name = item.get("qbo_tax_code", "EX Exempt")
                 line_tax_ref = self._resolve_tax_code_by_name(line_tax_name)
                 print(f"[QBO] Line {i}: tax_code='{line_tax_name}' → TaxCodeRef={line_tax_ref}")
 
@@ -828,11 +823,9 @@ class QuickBooksService:
                     "Description": str(item.get("description", "") or ""),
                 })
 
-            print(f"[QBO] Location: {location_cat} | UAE: {is_uae} | VAT: {vat_amount} | GlobalTax: {apply_global_tax}")
-
             # Safety: always have at least one line
             if not qbo_lines:
-                fallback_tax_ref = self._resolve_tax_code_by_name(default_tax_name)
+                fallback_tax_ref = self._resolve_tax_code_by_name("EX Exempt")
                 qbo_lines = [{
                     "Id":         "1",
                     "Amount":     max(round(total_amount, 2), 0.01),
@@ -891,24 +884,26 @@ class QuickBooksService:
             }
 
             if term_ref:
+
                 payload["SalesTermRef"] = term_ref
+
             if loc_ref:
+
                 # Copy dict to avoid modifying cached dict
+
                 loc_ref_copy = loc_ref.copy()
+
                 ref_type = loc_ref_copy.pop("type", "LocationRef")
+
                 payload[ref_type] = loc_ref_copy
 
 
-            # ── Tax detail on the payload ─────────────────────
-            # Always set TaxExcluded when there's VAT so QBO applies tax on top of line amounts
-            if vat_amount > 0:
-                payload["GlobalTaxCalculation"] = "TaxExcluded"
-                if apply_global_tax:
-                    payload["TxnTaxDetail"] = {
-                        "TotalTax": round(vat_amount, 2),
-                    }
-            else:
-                payload["GlobalTaxCalculation"] = "TaxExcluded"
+
+            # Amounts are always exclusive of tax - QBO calculates tax
+
+            # per line based on each line's TaxCodeRef.
+
+            payload["GlobalTaxCalculation"] = "TaxExcluded"
 
             print(f"[QBO] Sending Bill payload: {json.dumps(payload, indent=2)}")
 

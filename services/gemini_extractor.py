@@ -13,6 +13,7 @@ class LineItem(BaseModel):
     unit_price: Optional[float] = None
     amount: Optional[float] = None
     tax_percentage: Optional[float] = None  # 0, 5, or null
+    tax_code: Optional[str] = None  # SR, EX, ZR, RC, IG
 
 class InvoiceData(BaseModel):
     date: Optional[str] = None
@@ -57,11 +58,46 @@ class GeminiExtractor:
         5. TRN (Tax Registration Number) in UAE is 15 digits starting with "100"
         6. Extract the supplier's full address as a single string.
         7. For EACH line item, extract the VAT/tax percentage applied (0, 5, or null if not shown).
+        8. For EACH line item, assign a tax_code based on the TAX CODE CLASSIFICATION RULES below.
 
         IDENTIFY CORRECTLY:
         - SUPPLIER = The company SENDING the invoice (usually has logo at top, their bank details)
         - BILL TO = The company RECEIVING the invoice (Elegant Hoopoe or similar)
         - Don't confuse these two!
+
+        TAX CODE CLASSIFICATION RULES:
+        Assign one of these codes to EACH line item based on supplier location and item type:
+
+          "SR" — Standard Rated (5% VAT). Normal taxable goods or services from a UAE-based supplier.
+          "EX" — Exempt (0%). Government fees, visa charges, labour/immigration fees, fines,
+                  bank charges, insurance premiums passed through at cost. Use for any
+                  regulatory or government-imposed charge.
+          "ZR" — Zero Rated (0%). Exports, international transport, certain education and
+                  healthcare supplies. Rare on domestic purchase invoices.
+          "RC" — Reverse Charge (0%). ANY supplier located OUTSIDE the UAE and outside the GCC.
+          "IG" — Intra GCC (0%). Supplier is in a GCC country (Saudi Arabia, Bahrain, Oman,
+                  Kuwait, Qatar) but NOT UAE VAT-registered.
+
+        DECISION LOGIC:
+          Step 1: Determine supplier location from their address and TRN.
+            - If supplier has a UAE TRN (15 digits starting with 100) or address contains
+              a UAE city/emirate → supplier is UAE-based → go to Step 2.
+            - If supplier address mentions Saudi Arabia, Bahrain, Oman, Kuwait, or Qatar
+              → use "IG" for ALL lines.
+            - If supplier is outside UAE and outside GCC → use "RC" for ALL lines.
+          Step 2 (UAE suppliers only): Classify EACH line individually.
+            - Government/regulatory fees, visa fees, labour fees, fines, stamps,
+              attestation charges, municipality fees, permit fees, typing fees,
+              medical test fees (for visa), bank charges, insurance premiums
+              passed at cost → "EX"
+            - Normal taxable goods and services (consulting, supplies, equipment,
+              maintenance, medical supplies, marketing, software, professional services)
+              → "SR"
+            - Exports, international freight/transport, certain education/healthcare
+              supplies designated zero-rated → "ZR"
+            - When unsure between "EX" and "ZR", default to "EX".
+            - When unsure between "EX" and "SR", look at the tax column on the invoice:
+              if the line shows 5% tax, use "SR"; if it shows 0% or no tax, use "EX".
 
         EXTRACT INTO THIS EXACT JSON STRUCTURE:
 
@@ -83,11 +119,20 @@ class GeminiExtractor:
           "currency": "AED",
           "line_items": [
             {
-              "description": "Item name",
+              "description": "Professional consulting service",
               "quantity": 1,
-              "unit_price": 0.00,
-              "amount": 0.00,
-              "tax_percentage": 5
+              "unit_price": 1000.00,
+              "amount": 1000.00,
+              "tax_percentage": 5,
+              "tax_code": "SR"
+            },
+            {
+              "description": "Government visa processing fee",
+              "quantity": 1,
+              "unit_price": 500.00,
+              "amount": 500.00,
+              "tax_percentage": 0,
+              "tax_code": "EX"
             }
           ],
           "extraction_confidence": "high|medium|low",
@@ -106,6 +151,7 @@ class GeminiExtractor:
         IMPORTANT:
         - The 'amount' in line_items should be the line total BEFORE tax.
         - tax_percentage per line: use 5 for 5% VAT, 0 for zero-rated/exempt, null if not visible.
+        - tax_code per line: MUST be one of SR, EX, ZR, RC, IG. Follow the classification rules above.
 
         Return ONLY valid JSON. No markdown, no explanation, no code blocks.
         """

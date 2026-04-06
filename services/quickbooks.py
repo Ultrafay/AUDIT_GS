@@ -453,6 +453,85 @@ class QuickBooksService:
         self.gl_cache[name_clean] = fallback
         return fallback
 
+    def _resolve_gl_account(self, gl_name: str) -> Tuple[dict, bool]:
+        """
+        Resolve a GL account name to a QBO AccountRef, searching both Expense
+        and Cost of Goods Sold account types.  Returns (ref, matched) where
+        matched is False if we fell back to the default account.
+        """
+        if not gl_name or not gl_name.strip():
+            return self._get_default_expense_account(), False
+
+        name_clean = gl_name.lower().strip()
+
+        # Check cache
+        if name_clean in self.gl_cache:
+            return self.gl_cache[name_clean], True
+
+        # Search both Expense and COGS account types
+        all_accounts = []
+        for acct_type in ["Expense", "Cost of Goods Sold"]:
+            try:
+                query = f"SELECT * FROM Account WHERE AccountType = '{acct_type}' AND SubAccount = false MAXRESULTS 100"
+                resp = self._request("GET", "query", params={"query": query})
+                if resp.status_code == 200:
+                    accounts = resp.json().get("QueryResponse", {}).get("Account", [])
+                    all_accounts.extend(accounts)
+            except Exception as e:
+                print(f"[QBO] Error querying {acct_type} accounts: {e}")
+
+        best_account = None
+        best_score = 0
+
+        for acc in all_accounts:
+            display_name = acc.get("Name", "")
+            score = fuzz.ratio(name_clean, display_name.lower().strip())
+            partial_score = fuzz.partial_ratio(name_clean, display_name.lower().strip())
+            top_score = max(score, partial_score)
+
+            if top_score > best_score:
+                best_score = top_score
+                best_account = acc
+
+        if best_score >= FUZZY_MATCH_THRESHOLD and best_account:
+            matched_ref = {
+                "value": str(best_account.get("Id")),
+                "name": str(best_account.get("Name"))
+            }
+            print(f"[QBO] GL '{gl_name}' → '{matched_ref['name']}' (score={best_score})")
+            self.gl_cache[name_clean] = matched_ref
+            return matched_ref, True
+
+        print(f"[QBO] GL '{gl_name}' not found in QBO (best={best_score}). Falling back.")
+        fallback = self._get_default_expense_account()
+        self.gl_cache[name_clean] = fallback
+        return fallback, False
+
+    def get_all_account_names(self) -> list:
+        """
+        Fetch all account names from QBO for injecting into the GPT-4o prompt
+        as chart of accounts context.  Cached after first call.
+        """
+        if getattr(self, '_all_account_names', None) is not None:
+            return self._all_account_names
+
+        self._all_account_names = []
+        try:
+            for acct_type in ["Expense", "Cost of Goods Sold", "Other Expense"]:
+                query = f"SELECT * FROM Account WHERE AccountType = '{acct_type}' AND Active = true MAXRESULTS 200"
+                resp = self._request("GET", "query", params={"query": query})
+                if resp.status_code == 200:
+                    accounts = resp.json().get("QueryResponse", {}).get("Account", [])
+                    for acc in accounts:
+                        name = acc.get("Name", "").strip()
+                        if name:
+                            self._all_account_names.append(name)
+            print(f"[QBO] Fetched {len(self._all_account_names)} account names for GPT-4o prompt")
+        except Exception as e:
+            print(f"[QBO] get_all_account_names error: {e}")
+
+        return self._all_account_names
+
     def _get_account_by_name(self, account_name: str, query_condition: str = "") -> Optional[dict]:
         """
         Generic fuzzy search for any account.
@@ -787,19 +866,16 @@ class QuickBooksService:
                     "amount": total_amount,
                 }]
 
-            # ── Resolve GL Account (once, for all lines) ──────────
-            # Priority: pre-resolved ref from GLClassifier > fuzzy name fallback
-            gl_account_ref = invoice_data.get("gl_account_ref")
-            if not gl_account_ref:
-                gl_account_ref = self._get_expense_account_by_name(
+            # ── Fallback GL account (used when per-line gl_code is missing) ──
+            fallback_gl_ref = invoice_data.get("gl_account_ref")
+            if not fallback_gl_ref:
+                fallback_gl_ref = self._get_expense_account_by_name(
                     invoice_data.get("gl_code_suggested", "")
                 )
-            print(f"[QBO] Using GL account: {gl_account_ref}")
 
-            # ── Per-line tax codes ────────────────────────────────
-            # Each line item already has `qbo_tax_code` set by the VAT
-            # processor.  We just resolve it to a QBO TaxCodeRef here.
+            # ── Per-line tax codes & GL accounts ─────────────────
             location_cat = invoice_data.get("supplier_location_category", "Unknown")
+            gl_mismatch_notes = []  # track lines where GL didn't match
 
             qbo_lines = []
             for i, item in enumerate(line_items, start=1):
@@ -807,16 +883,29 @@ class QuickBooksService:
                 if item_amount <= 0:
                     continue
 
+                # ── Per-line tax code ────────────────────────────
                 line_tax_name = item.get("qbo_tax_code", "EX Exempt")
                 line_tax_ref = self._resolve_tax_code_by_name(line_tax_name)
-                print(f"[QBO] Line {i}: tax_code='{line_tax_name}' → TaxCodeRef={line_tax_ref}")
+
+                # ── Per-line GL account ──────────────────────────
+                line_gl_name = item.get("gl_code", "") or ""
+                if line_gl_name:
+                    line_gl_ref, matched = self._resolve_gl_account(line_gl_name)
+                    if not matched:
+                        gl_mismatch_notes.append(
+                            f"Line {i}: GL '{line_gl_name}' not found in QBO, used '{line_gl_ref.get('name', 'fallback')}'"
+                        )
+                else:
+                    line_gl_ref = fallback_gl_ref
+
+                print(f"[QBO] Line {i}: tax='{line_tax_name}' → {line_tax_ref}, GL='{line_gl_ref.get('name', '?')}'")
 
                 qbo_lines.append({
                     "Id":         str(i),
                     "Amount":     round(item_amount, 2),
                     "DetailType": "AccountBasedExpenseLineDetail",
                     "AccountBasedExpenseLineDetail": {
-                        "AccountRef":    gl_account_ref,
+                        "AccountRef":    line_gl_ref,
                         "BillableStatus": "NotBillable",
                         "TaxCodeRef":     line_tax_ref,
                     },
@@ -831,7 +920,7 @@ class QuickBooksService:
                     "Amount":     max(round(total_amount, 2), 0.01),
                     "DetailType": "AccountBasedExpenseLineDetail",
                     "AccountBasedExpenseLineDetail": {
-                        "AccountRef":    gl_account_ref,
+                        "AccountRef":    fallback_gl_ref,
                         "BillableStatus": "NotBillable",
                         "TaxCodeRef":     fallback_tax_ref,
                     },
@@ -839,8 +928,6 @@ class QuickBooksService:
                 }]
 
             # ── Currency & Exchange Rate ────────────────────────────
-            # Always use the vendor's currency (QBO requires bill currency
-            # to match the vendor's currency).  Log a warning if they differ.
             invoice_currency = str(invoice_data.get("currency", "USD") or "USD").upper()
             if invoice_currency == "CURRENCY_DEFAULTED_TO_USD":
                 invoice_currency = "USD"
@@ -851,18 +938,20 @@ class QuickBooksService:
                     f"[QBO] Currency mismatch: invoice says '{invoice_currency}' "
                     f"but vendor is '{currency_code}'. Using vendor currency."
                 )
-                
+
             exchange_rate = self.get_exchange_rate(currency_code, txn_date)
 
             # ── Build Payload ─────────────────────────────────────
             memo_text = ""
             if invoice_data.get("manual_review_memo"):
                 memo_text = f" | {invoice_data.get('manual_review_memo')}"
+            if gl_mismatch_notes:
+                memo_text += " | GL: " + "; ".join(gl_mismatch_notes)
 
             # ── Resolve Terms and Locations ───────────────────────
             credit_terms = str(invoice_data.get("credit_terms", "") or "").strip()
             purchase_loc = str(invoice_data.get("purchase_location", "") or "").strip()
-            
+
             term_ref = self._resolve_term_by_name(credit_terms)
             loc_ref = self._resolve_location_by_name(purchase_loc)
 
@@ -871,7 +960,7 @@ class QuickBooksService:
                 "Line":      qbo_lines,
                 "TxnDate":   txn_date,
                 "DueDate":   due_date,
-                "DocNumber": str(invoice_data.get("invoice_number", "") or "")[:21], # QBO trims at 21 chars
+                "DocNumber": str(invoice_data.get("invoice_number", "") or "")[:21],
                 "CurrencyRef": {
                     "value": currency_code
                 },
@@ -884,26 +973,21 @@ class QuickBooksService:
             }
 
             if term_ref:
-
                 payload["SalesTermRef"] = term_ref
 
             if loc_ref:
-
-                # Copy dict to avoid modifying cached dict
-
                 loc_ref_copy = loc_ref.copy()
-
                 ref_type = loc_ref_copy.pop("type", "LocationRef")
-
                 payload[ref_type] = loc_ref_copy
 
-
-
-            # Amounts are always exclusive of tax - QBO calculates tax
-
-            # per line based on each line's TaxCodeRef.
-
-            payload["GlobalTaxCalculation"] = "TaxExcluded"
+            # ── Tax Calculation Mode ──────────────────────────────
+            # Non-UAE invoices with distributed foreign tax use TaxInclusive;
+            # UAE invoices (and non-UAE without foreign tax) use TaxExcluded.
+            if invoice_data.get("tax_inclusive"):
+                payload["GlobalTaxCalculation"] = "TaxInclusive"
+                print("[QBO] Using TaxInclusive (foreign tax distributed into line amounts)")
+            else:
+                payload["GlobalTaxCalculation"] = "TaxExcluded"
 
             print(f"[QBO] Sending Bill payload: {json.dumps(payload, indent=2)}")
 
@@ -913,13 +997,15 @@ class QuickBooksService:
                 bill    = resp.json().get("Bill", {})
                 bill_id = str(bill.get("Id", ""))
                 print(f"[QBO] Success: Bill posted — ID: {bill_id}")
-                
-                # Check if Foreign supplier to trigger RCM Journal Entry
+
+                # RCM Journal Entry — only for Foreign vendors when NOT using
+                # TaxInclusive mode (TaxInclusive + RC codes makes QBO handle
+                # RCM automatically).
                 location_cat = invoice_data.get("supplier_location_category", "Unknown")
-                if location_cat == "Foreign":
+                if location_cat == "Foreign" and not invoice_data.get("tax_inclusive"):
                     amount_aed = total_amount * exchange_rate
                     self.create_rcm_journal_entry(bill_id, amount_aed, txn_date)
-                    
+
                 return "posted", bill_id
             else:
                 print(f"[QBO] post_bill failed: {resp.status_code} — {resp.text}")

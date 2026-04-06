@@ -2,7 +2,7 @@
 VAT Processor — validates and finalises per-line tax codes before QBO
 bill posting.
 
-The AI extractor now assigns a `tax_code` (SR / EX / ZR / RC / IG) to each
+The AI extractor assigns a `tax_code` (SR / EX / ZR / RC / IG) to each
 line item.  This module:
 
   1. Determines the supplier location category (UAE / GCC / Foreign) from
@@ -11,8 +11,10 @@ line item.  This module:
      missing or inconsistent, it assigns a sensible fallback and flags for
      review.
   3. Maps shorthand codes to the full QBO TaxCode names.
-  4. Computes implied tax totals from per-line codes and compares them to
-     the invoice-level `vat_amount`. Flags mismatches > threshold.
+  4. For non-UAE invoices with foreign tax, distributes the tax into line
+     amounts and sets a flag for TaxInclusive mode.
+  5. Computes implied tax totals from per-line codes and compares them to
+     the invoice-level tax amount. Flags mismatches > threshold.
 """
 import re
 from typing import List
@@ -113,19 +115,79 @@ def _fallback_code_for_location(category: str, tax_pct, has_invoice_vat: bool) -
     return "SR" if has_invoice_vat else "EX"
 
 
+# ── Foreign tax distribution ──────────────────────────────────────────────
+
+def _distribute_foreign_tax(invoice_data: dict, line_items: List[dict]) -> List[dict]:
+    """
+    For non-UAE invoices, distribute the foreign tax proportionally across
+    line items based on each line's share of the subtotal.
+
+    After distribution, each line's `amount` becomes the gross (tax-inclusive)
+    value.  The caller should set GlobalTaxCalculation = "TaxInclusive" on the
+    QBO bill.
+    """
+    invoice_tax = float(invoice_data.get("invoice_tax_amount", 0.0) or 0.0)
+    if invoice_tax <= 0:
+        return line_items
+
+    # Calculate subtotal (sum of pre-tax line amounts)
+    subtotal = sum(float(item.get("amount", 0.0) or 0.0) for item in line_items)
+    if subtotal <= 0:
+        return line_items
+
+    print(f"[VAT] Distributing foreign tax {invoice_tax} across {len(line_items)} lines (subtotal={subtotal})")
+
+    grossed_up = []
+    distributed_total = 0.0
+
+    for item in line_items:
+        item_amount = float(item.get("amount", 0.0) or 0.0)
+        if item_amount <= 0:
+            grossed_up.append(item)
+            continue
+
+        share = item_amount / subtotal
+        tax_portion = round(share * invoice_tax, 2)
+        new_amount = round(item_amount + tax_portion, 2)
+        distributed_total += tax_portion
+
+        item = dict(item)  # shallow copy to avoid mutating original
+        item["amount"] = new_amount
+        item["_pre_tax_amount"] = item_amount  # keep for debugging
+        grossed_up.append(item)
+
+    # Fix rounding: push any residual onto the largest line
+    residual = round(invoice_tax - distributed_total, 2)
+    if abs(residual) > 0 and grossed_up:
+        # Find the largest line
+        largest_idx = max(
+            range(len(grossed_up)),
+            key=lambda i: float(grossed_up[i].get("amount", 0.0) or 0.0),
+        )
+        grossed_up[largest_idx] = dict(grossed_up[largest_idx])
+        grossed_up[largest_idx]["amount"] = round(
+            float(grossed_up[largest_idx]["amount"]) + residual, 2
+        )
+        print(f"[VAT] Rounding residual {residual} applied to line {largest_idx + 1}")
+
+    return grossed_up
+
+
 # ── Main entry point ─────────────────────────────────────────────────────
 
 def process_vat(invoice_data: dict) -> dict:
     """
     Validate per-line tax codes, assign fallbacks where missing, map to
-    full QBO names, and run tax-total mismatch check.
+    full QBO names, handle foreign tax distribution, and run tax-total
+    mismatch check.
     """
     category = get_location_category(invoice_data)
     vat_amount = float(invoice_data.get("vat_amount", 0.0) or 0.0)
+    invoice_tax = float(invoice_data.get("invoice_tax_amount", 0.0) or 0.0)
     line_items: List[dict] = invoice_data.get("line_items", []) or []
-    has_invoice_vat = vat_amount > 0
+    has_invoice_vat = vat_amount > 0 or invoice_tax > 0
 
-    print(f"[VAT] Supplier Location: {category} — VAT: {vat_amount}, Lines: {len(line_items)}")
+    print(f"[VAT] Supplier Location: {category} — VAT: {vat_amount}, Invoice Tax: {invoice_tax}, Lines: {len(line_items)}")
 
     invoice_data["supplier_location_category"] = category
     valid_codes = _valid_codes_for_location(category)
@@ -163,23 +225,52 @@ def process_vat(invoice_data: dict) -> dict:
         item["tax_code"] = raw_code
         item["qbo_tax_code"] = TAX_CODE_MAP[raw_code]
 
+    # ── Foreign tax distribution (non-UAE only) ───────────────────────────
+    if category in ("GCC", "Foreign") and invoice_tax > 0:
+        line_items = _distribute_foreign_tax(invoice_data, line_items)
+        invoice_data["tax_inclusive"] = True
+        print(f"[VAT] Foreign tax distributed. Bill will use TaxInclusive mode.")
+    else:
+        invoice_data["tax_inclusive"] = False
+
     # ── Tax mismatch validation ───────────────────────────────────────────
-    implied_tax = 0.0
-    for item in line_items:
-        item_amount = float(item.get("amount", 0.0) or 0.0)
-        rate = TAX_RATE_MAP.get(item.get("tax_code", ""), 0.0)
-        implied_tax += item_amount * rate
+    # Use invoice_tax_amount (the actual tax on the invoice) for comparison.
+    # Fall back to vat_amount if invoice_tax_amount is not set.
+    reference_tax = invoice_tax if invoice_tax > 0 else vat_amount
 
-    implied_tax = round(implied_tax, 2)
-    diff = abs(implied_tax - vat_amount)
+    if category == "UAE":
+        # UAE: sum of implied tax from per-line codes
+        implied_tax = 0.0
+        for item in line_items:
+            item_amount = float(item.get("_pre_tax_amount", item.get("amount", 0.0)) or 0.0)
+            rate = TAX_RATE_MAP.get(item.get("tax_code", ""), 0.0)
+            implied_tax += item_amount * rate
 
-    if diff > _MISMATCH_THRESHOLD:
-        msg = (
-            f"TAX MISMATCH: per-line implied tax = {implied_tax}, "
-            f"invoice vat_amount = {vat_amount}, diff = {diff:.2f}"
-        )
-        review_messages.append(msg)
-        print(f"[VAT] {msg}")
+        implied_tax = round(implied_tax, 2)
+        diff = abs(implied_tax - reference_tax)
+
+        if diff > _MISMATCH_THRESHOLD:
+            msg = (
+                f"TAX MISMATCH: computed tax = {implied_tax}, "
+                f"invoice tax = {reference_tax}, diff = {diff:.2f} — review line tax codes"
+            )
+            review_messages.append(msg)
+            print(f"[VAT] {msg}")
+    else:
+        # Non-UAE: verify grossed-up total equals invoice total
+        total_amount = float(invoice_data.get("total_amount", 0.0) or 0.0)
+        if total_amount > 0 and invoice_tax > 0:
+            grossed_sum = sum(float(item.get("amount", 0.0) or 0.0) for item in line_items)
+            grossed_sum = round(grossed_sum, 2)
+            diff = abs(grossed_sum - total_amount)
+
+            if diff > _MISMATCH_THRESHOLD:
+                msg = (
+                    f"TAX MISMATCH: grossed-up line total = {grossed_sum}, "
+                    f"invoice total = {total_amount}, diff = {diff:.2f} — review amounts"
+                )
+                review_messages.append(msg)
+                print(f"[VAT] {msg}")
 
     # ── Assemble review memo ──────────────────────────────────────────────
     if review_messages:
@@ -194,8 +285,9 @@ def process_vat(invoice_data: dict) -> dict:
     invoice_data["line_items"] = line_items
     invoice_data["is_uae_invoice"] = (category == "UAE")
 
-    # For GCC / Foreign, zero out vat_amount so QBO doesn't double-count
-    if category in ("GCC", "Foreign"):
+    # For GCC / Foreign WITHOUT foreign tax distribution, zero out vat_amount
+    # so QBO doesn't double-count.  If tax was distributed, keep it for audit.
+    if category in ("GCC", "Foreign") and not invoice_data.get("tax_inclusive"):
         invoice_data["vat_amount"] = 0.0
 
     return invoice_data

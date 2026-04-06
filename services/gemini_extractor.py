@@ -14,6 +14,7 @@ class LineItem(BaseModel):
     amount: Optional[float] = None
     tax_percentage: Optional[float] = None  # 0, 5, or null
     tax_code: Optional[str] = None  # SR, EX, ZR, RC, IG
+    gl_code: Optional[str] = None  # GL Account Name for this line
 
 class InvoiceData(BaseModel):
     date: Optional[str] = None
@@ -29,6 +30,7 @@ class InvoiceData(BaseModel):
     gl_code_suggested: Optional[str] = None
     exclusive_amount: Optional[float] = None
     vat_amount: Optional[float] = None
+    invoice_tax_amount: Optional[float] = None  # Total tax from the invoice
     total_amount: Optional[float] = None
     currency: str = "AED"
     line_items: List[LineItem] = []

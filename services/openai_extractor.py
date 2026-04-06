@@ -6,6 +6,8 @@ from typing import Optional, List
 from pydantic import BaseModel, Field
 import os
 
+from services.gl_reference_data import build_gl_prompt_section
+
 # --- Data Models (shared with the rest of the app) ---
 
 class LineItem(BaseModel):
@@ -15,6 +17,7 @@ class LineItem(BaseModel):
     amount: Optional[float] = None
     tax_percentage: Optional[float] = None  # 0, 5, or null
     tax_code: Optional[str] = None  # SR, EX, ZR, RC, IG
+    gl_code: Optional[str] = None  # GL Account Name for this line
 
 class InvoiceData(BaseModel):
     date: Optional[str] = None
@@ -31,6 +34,7 @@ class InvoiceData(BaseModel):
     gl_code_suggested: Optional[str] = None
     exclusive_amount: Optional[float] = None
     vat_amount: Optional[float] = None
+    invoice_tax_amount: Optional[float] = None  # Total tax from the invoice
     total_amount: Optional[float] = None
     currency: str = "AED"
     line_items: List[LineItem] = []
@@ -52,8 +56,22 @@ class OpenAIExtractor:
             project=project_id
         )
         self.model = "gpt-4o"
-        
-        self.system_prompt = """You are an expert invoice data extraction system for a UAE-based company.
+
+        # GL prompt section is injected at runtime (chart of accounts may be
+        # loaded later).  Callers can update self._gl_prompt after init.
+        self._gl_prompt: str = build_gl_prompt_section()
+
+    # ── Public: update GL context ────────────────────────────────────────────
+
+    def set_chart_of_accounts(self, account_names: List[str]) -> None:
+        """Re-build the GL prompt section with a live chart of accounts."""
+        self._gl_prompt = build_gl_prompt_section(chart_of_accounts=account_names)
+        print(f"[OpenAI] GL prompt updated with {len(account_names)} accounts from QBO")
+
+    # ── System Prompt ────────────────────────────────────────────────────────
+
+    def _build_system_prompt(self) -> str:
+        return f"""You are an expert invoice data extraction system for a UAE-based company.
 
 Analyze this invoice and extract ALL relevant data. The invoice may contain English, Arabic, or both languages.
 
@@ -68,6 +86,10 @@ CRITICAL INSTRUCTIONS:
 8. Extract the supplier's full address as a single string.
 9. For EACH line item, extract the VAT/tax percentage applied (0, 5, or null if not shown).
 10. For EACH line item, assign a tax_code based on the TAX CODE CLASSIFICATION RULES below.
+11. For EACH line item, assign a gl_code based on the GL CODE CLASSIFICATION section below.
+12. Extract the total tax/VAT amount shown on the invoice into invoice_tax_amount. This is the
+    total tax the invoice charges (could be UAE VAT, US sales tax, UK VAT, etc.). If no tax is
+    shown, set to 0.
 
 IDENTIFY CORRECTLY:
 - SUPPLIER = The company SENDING the invoice
@@ -76,7 +98,7 @@ IDENTIFY CORRECTLY:
 TAX CODE CLASSIFICATION RULES:
 Assign one of these codes to EACH line item based on supplier location and item type:
 
-  "SR" — Standard Rated (5% VAT). Normal taxable goods or services from a UAE-based supplier.
+  "SR" — Standard Rated (5% VAT). Normal taxable goods and services from a UAE-based supplier.
   "EX" — Exempt (0%). Government fees, visa charges, labour/immigration fees, fines,
           bank charges, insurance premiums passed through at cost. Use for any
           regulatory or government-imposed charge.
@@ -107,9 +129,11 @@ DECISION LOGIC:
     - When unsure between "EX" and "SR", look at the tax column on the invoice:
       if the line shows 5% tax, use "SR"; if it shows 0% or no tax, use "EX".
 
+{self._gl_prompt}
+
 EXTRACT INTO THIS EXACT JSON STRUCTURE:
 
-{
+{{
   "date": "YYYY-MM-DD",
   "supplier_name": "Company issuing the invoice",
   "supplier_trn": "15-digit TRN or null",
@@ -120,32 +144,35 @@ EXTRACT INTO THIS EXACT JSON STRUCTURE:
   "due_date": "YYYY-MM-DD or null",
   "credit_terms": "NET 30, Cheque, Immediate, etc.",
   "bill_to": "Customer name",
-  "gl_code_suggested": "Medical Supplies | Equipment | Marketing | Professional Services | Government Fees | Office Supplies | Utilities | Other",
+  "gl_code_suggested": "Primary GL category for the invoice overall (from keyword mapping or general knowledge)",
   "exclusive_amount": 0.00,
   "vat_amount": 0.00,
+  "invoice_tax_amount": 0.00,
   "total_amount": 0.00,
   "currency": "AED (default to USD if unknown)",
   "line_items": [
-    {
+    {{
       "description": "Professional consulting service",
       "quantity": 1.0,
       "unit_price": 1000.00,
       "amount": 1000.00,
       "tax_percentage": 5,
-      "tax_code": "SR"
-    },
-    {
+      "tax_code": "SR",
+      "gl_code": "Legal & Professional Fees"
+    }},
+    {{
       "description": "Government visa processing fee",
       "quantity": 1.0,
       "unit_price": 500.00,
       "amount": 500.00,
       "tax_percentage": 0,
-      "tax_code": "EX"
-    }
+      "tax_code": "EX",
+      "gl_code": "Legal & Professional Fees"
+    }}
   ],
   "extraction_confidence": "high|medium|low",
   "notes": "Any issues found"
-}
+}}
 
 IMPORTANT:
 - If an item is free/bonus (FOC), set unit_price to 0 and amount to 0.
@@ -153,7 +180,11 @@ IMPORTANT:
 - The 'amount' in line_items should be the line total (Quantity * Unit Price) BEFORE tax.
 - tax_percentage per line: use 5 for 5% VAT, 0 for zero-rated/exempt, null if not visible.
 - tax_code per line: MUST be one of SR, EX, ZR, RC, IG. Follow the classification rules above.
-- Ensure 'total_amount' matches the sum of line items + VAT.
+- gl_code per line: MUST be a GL Account Name from the keyword mapping or chart of accounts.
+- invoice_tax_amount: Extract the total tax amount shown on the invoice (e.g., "VAT 5%: 50.00"
+  means invoice_tax_amount = 50.00). This includes foreign taxes (US sales tax, UK VAT, etc.).
+  If no tax line is shown, set to 0.
+- Ensure 'total_amount' matches the sum of line items + tax.
 
 Return ONLY valid JSON. No markdown."""
 
@@ -185,7 +216,7 @@ Return ONLY valid JSON. No markdown."""
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
-                {"role": "system", "content": self.system_prompt},
+                {"role": "system", "content": self._build_system_prompt()},
                 {
                     "role": "user",
                     "content": [

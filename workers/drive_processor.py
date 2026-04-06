@@ -18,7 +18,6 @@ load_dotenv()
 from services.drive_watcher import GoogleDriveWatcher
 from services.openai_extractor import OpenAIExtractor
 from services.sheets_service import GoogleSheetsService
-from services.gl_classifier import GLClassifier
 from utils.credentials_helper import get_credentials_path
 
 # QBO integration (imported lazily so missing deps don't break the rest)
@@ -73,18 +72,14 @@ class DriveProcessor:
         else:
             print(f"[DriveProcessor] QBO Skipped -> available:{_qbo_available}, realm:{os.getenv('QBO_REALM_ID')}, auto_push:{os.getenv('AUTO_PUSH_TO_QBO')}")
 
-        # Initialize GL Classifier (uses same sheets client, separate mapping sheet)
-        self.gl_classifier = None
-        _gl_sheet_id = os.getenv("GL_MAPPING_SHEET_ID", "")
-        if _gl_sheet_id:
+        # Inject chart of accounts into GPT-4o prompt
+        if self.qbo and self.extractor:
             try:
-                self.gl_classifier = GLClassifier(self.sheets, _gl_sheet_id)
-                self.gl_classifier.load_mapping()  # warm cache on startup
-                print("[DriveProcessor] GL Classifier initialized successfully.")
-            except Exception as _gl_err:
-                print(f"[DriveProcessor] GL Classifier init failed (continuing without GL mapping): {_gl_err}")
-        else:
-            print("[DriveProcessor] GL_MAPPING_SHEET_ID not set — GL classification disabled.")
+                account_names = self.qbo.get_all_account_names()
+                if account_names:
+                    self.extractor.set_chart_of_accounts(account_names)
+            except Exception as _coa_err:
+                print(f"[DriveProcessor] Could not load chart of accounts: {_coa_err}")
 
         print(f"[DriveProcessor] Initialized. Watching folder: {folder_id}")
 
@@ -203,19 +198,7 @@ class DriveProcessor:
                     invoice_dict = result.dict()
                     invoice_dict["file_id"] = internal_id  # pass through for PrivateNote
 
-                    # ── GL Classification ────────────────────────────
-                    if self.gl_classifier:
-                        gl_name = self.gl_classifier.classify(invoice_dict.get("line_items", []))
-                        if gl_name:
-                            invoice_dict["gl_account_ref"] = self.qbo._get_expense_account_by_name(gl_name)
-                            print(f"[DriveProcessor]   GL matched: '{gl_name}'")
-                        else:
-                            invoice_dict["gl_account_ref"] = self.qbo._get_expense_account_by_name("Uncategorized Asset")
-                            self.gl_classifier.log_pending_review(invoice_dict, "No match")
-                            print("[DriveProcessor]   GL: no match — logged to Pending Review")
-                    # ── End GL Classification ────────────────────────
-
-                    # ── VAT Processing (UAE vs Foreign) ──────────────
+                    # ── VAT Processing (per-line tax codes + foreign tax) ──
                     from services.vat_processor import process_vat
                     invoice_dict = process_vat(invoice_dict)
                     # ── End VAT Processing ───────────────────────────

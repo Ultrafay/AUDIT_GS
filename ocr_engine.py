@@ -16,7 +16,6 @@ from dotenv import load_dotenv
 # Import New Services
 from services.openai_extractor import OpenAIExtractor, InvoiceData
 from services.sheets_service import GoogleSheetsService
-from services.gl_classifier import GLClassifier
 from utils.credentials_helper import get_credentials_path
 
 # QBO integration (optional)
@@ -49,19 +48,17 @@ except Exception as e:
     extractor = None
     sheets = None
 
-# Initialize GL Classifier (uses same sheets client, separate mapping sheet)
+# GL Classifier — kept for pending review logging only
 gl_classifier = None
-if sheets:
+try:
+    from services.gl_classifier import GLClassifier
     _gl_sheet_id = os.getenv("GL_MAPPING_SHEET_ID", "")
-    if _gl_sheet_id:
-        try:
-            gl_classifier = GLClassifier(sheets, _gl_sheet_id)
-            gl_classifier.load_mapping()  # warm cache on startup
-            print("GL Classifier initialized successfully.")
-        except Exception as _gl_err:
-            print(f"Warning: GL Classifier init failed (continuing without GL mapping): {_gl_err}")
-    else:
-        print("GL_MAPPING_SHEET_ID not set — GL classification disabled.")
+    if sheets and _gl_sheet_id:
+        gl_classifier = GLClassifier(sheets, _gl_sheet_id)
+        gl_classifier.load_mapping()
+        print("GL Classifier initialized (pending review logging).")
+except Exception as _gl_err:
+    print(f"GL Classifier not available: {_gl_err}")
 
 # Initialize QBO (optional — skipped gracefully if not configured)
 qbo = None
@@ -69,6 +66,15 @@ if _qbo_available and os.getenv("QBO_REALM_ID") and os.getenv("AUTO_PUSH_TO_QBO"
     try:
         qbo = QuickBooksService()
         print("QuickBooks service initialized successfully.")
+
+        # Inject chart of accounts into GPT-4o prompt
+        if extractor and qbo:
+            try:
+                account_names = qbo.get_all_account_names()
+                if account_names:
+                    extractor.set_chart_of_accounts(account_names)
+            except Exception as _coa_err:
+                print(f"Warning: Could not load chart of accounts: {_coa_err}")
     except Exception as _qbo_err:
         print(f"Warning: QuickBooks init failed (continuing without QBO): {_qbo_err}")
 
@@ -110,19 +116,7 @@ def process_invoice(file_path: Path, file_id: str):
                     invoice_dict = result_data.dict()
                     invoice_dict["file_id"] = file_id
 
-                    # ── GL Classification ────────────────────────────
-                    if gl_classifier:
-                        gl_name = gl_classifier.classify(invoice_dict.get("line_items", []))
-                        if gl_name:
-                            # Resolve account ID from QBO (cached after first lookup)
-                            invoice_dict["gl_account_ref"] = qbo._get_expense_account_by_name(gl_name)
-                        else:
-                            # No match — fall back to Uncategorized Asset and log for review
-                            invoice_dict["gl_account_ref"] = qbo._get_expense_account_by_name("Uncategorized Asset")
-                            gl_classifier.log_pending_review(invoice_dict, "No match")
-                    # ── End GL Classification ────────────────────────
-
-                    # ── VAT Processing (UAE vs Foreign vs GCC) ──────
+                    # ── VAT Processing (per-line tax codes + foreign tax) ──
                     from services.vat_processor import process_vat
                     invoice_dict = process_vat(invoice_dict)
                     # ── End VAT Processing ─────────────────────────

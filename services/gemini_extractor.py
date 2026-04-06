@@ -64,6 +64,13 @@ class GeminiExtractor:
         7. For EACH line item, extract the VAT/tax percentage applied (0, 5, or null if not shown).
         8. Assign tax codes (SR, EX, ZR, RC, IG) per line item based on the rules below.
         9. Assign GL categories per line item based on the keyword mapping provided.
+        10. Extract the total tax/VAT amount shown on the invoice into invoice_tax_amount.
+            This is the total tax the invoice charges (could be UAE VAT, US sales tax, UK VAT, etc.).
+            If no tax line is shown, set to 0.
+        11. Extract the explicit tax percentage into invoice_tax_percentage.
+            If the invoice clearly states "Sales Tax (8.25%)" or "VAT 5%" use that exact number.
+            If no percentage is stated, use null.
+        12. Extract the pre-tax subtotal into exclusive_amount (the sum of line items before tax).
 
         TAX CODE CLASSIFICATION RULES:
         Assign one of these codes to EACH line item based on supplier location and item type:
@@ -83,7 +90,7 @@ class GeminiExtractor:
         {gl_prompt}
 
         EXTRACT INTO THIS EXACT JSON STRUCTURE:
-        {
+        {{
           "date": "YYYY-MM-DD",
           "supplier_name": "Company issuing the invoice",
           "supplier_trn": "15-digit TRN or null",
@@ -97,7 +104,7 @@ class GeminiExtractor:
           "total_amount": 0.00,
           "currency": "AED (default to USD if unknown)",
           "line_items": [
-            {
+            {{
               "description": "Item description",
               "quantity": 1,
               "unit_price": 1000.00,
@@ -105,12 +112,18 @@ class GeminiExtractor:
               "tax_percentage": 5,
               "tax_code": "SR",
               "gl_code": "Resolved GL Account Name"
-            }
+            }}
           ],
           "notes": "Any issues or assumptions"
-        }
+        }}
 
-        Return ONLY valid JSON.
+        IMPORTANT:
+        - line_items[].amount must be the PRE-TAX line total (Quantity × Unit Price), BEFORE any tax.
+        - invoice_tax_amount is the TOTAL tax charged on the whole invoice.
+        - invoice_tax_percentage is the stated rate (e.g. 8.25 for "Sales Tax 8.25%"), NOT the per-line rate.
+        - exclusive_amount is the sum of all line amounts before tax (the subtotal).
+        - total_amount = exclusive_amount + invoice_tax_amount.
+        Return ONLY valid JSON. No markdown.
         """
     
     def set_chart_of_accounts(self, account_names: List[str]):

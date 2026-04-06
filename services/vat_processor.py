@@ -120,77 +120,101 @@ def _fallback_code_for_location(category: str, tax_pct, has_invoice_vat: bool) -
 def _determine_rcm_tax(invoice_data: dict, subtotal: float) -> tuple[float, float]:
     """
     Determine the actual RCM tax percentage and absolute amount.
+
+    Priority order:
+      1. Explicit invoice_tax_percentage (e.g., "Sales Tax 8.25%" → 8.25)
+      2. Calculated from invoice_tax_amount / subtotal
+      3. Fallback to 0.0 (no RCM tax)
+
     Returns (percentage, amount)
     """
     tax_pct = invoice_data.get("invoice_tax_percentage")
     tax_amt = float(invoice_data.get("invoice_tax_amount", 0.0) or 0.0)
-    
+
     if tax_pct is not None and tax_pct != "":
         tax_pct = float(tax_pct)
+        # If the invoice gave us the percentage but not the amount, derive it
         if tax_amt <= 0 and subtotal > 0:
             tax_amt = round(subtotal * (tax_pct / 100.0), 2)
+        print(f"[VAT] RCM tax determined from explicit invoice_tax_percentage: {tax_pct}% → amount={tax_amt}")
         return tax_pct, tax_amt
-        
+
     if tax_amt > 0 and subtotal > 0:
         calculated_pct = round((tax_amt / subtotal) * 100.0, 2)
+        print(f"[VAT] RCM tax calculated from invoice_tax_amount/subtotal: {tax_amt}/{subtotal} = {calculated_pct}%")
         return calculated_pct, tax_amt
-        
+
+    print("[VAT] No RCM tax information found — defaulting to 0.0%")
     return 0.0, 0.0
+
 
 def _distribute_foreign_tax(invoice_data: dict, line_items: List[dict]) -> List[dict]:
     """
-    For non-UAE invoices, distribute the foreign tax equally across line items.
-    
-    After distribution, each line's `amount` becomes the gross (tax-inclusive) value.
+    For non-UAE invoices, apply the foreign tax PROPORTIONALLY to each line item.
+
+    Each line receives: gross_amount = pre_tax_amount × (1 + tax_rate)
+
+    This ensures:
+      - Larger lines absorb more tax than smaller ones (correct)
+      - The sum of grossed-up line amounts ≈ invoice total_amount
+      - The RCM journal entry uses the same exact total tax amount
+
+    After distribution, each line's ``amount`` is the gross (tax-inclusive) value.
+    The original pre-tax value is preserved in ``_pre_tax_amount`` for audit.
     """
     subtotal = sum(float(item.get("amount", 0.0) or 0.0) for item in line_items)
-    
+
     rcm_pct, rcm_amt = _determine_rcm_tax(invoice_data, subtotal)
-    
-    # Store these back so QBO integration can use the exact amount for its journal entry
+
+    # Store so QBO can use the exact amount for the Input/Output VAT journal entry
     invoice_data["rcm_tax_percentage"] = rcm_pct
     invoice_data["rcm_tax_amount"] = rcm_amt
-    
+
     if rcm_amt <= 0:
+        print("[VAT] rcm_tax_amount = 0 — no foreign tax to distribute")
         return line_items
 
-    valid_line_indices = [i for i, item in enumerate(line_items) if float(item.get("amount", 0.0) or 0.0) > 0]
-    num_valid = len(valid_line_indices)
-    
+    tax_rate = rcm_pct / 100.0
+    valid_lines = [(i, float(item.get("amount", 0.0) or 0.0))
+                   for i, item in enumerate(line_items)
+                   if float(item.get("amount", 0.0) or 0.0) > 0]
+    num_valid = len(valid_lines)
+
     if num_valid == 0:
         return line_items
 
-    print(f"[VAT] Distributing {rcm_amt} (implied {rcm_pct}%) equally across {num_valid} lines (subtotal={subtotal})")
+    print(
+        f"[VAT] Proportional foreign-tax distribution: rate={rcm_pct}%, "
+        f"total_tax={rcm_amt}, subtotal={subtotal}, lines={num_valid}"
+    )
 
-    grossed_up = []
-    distributed_total = 0.0
-    per_line_tax = round(rcm_amt / num_valid, 2)
-    
-    valid_count = 0
+    # Build grossed-up list using proportional allocation
+    grossed_up = list(line_items)  # shallow copy of list
+    distributed_tax = 0.0
 
-    for i, item in enumerate(line_items):
-        item_amount = float(item.get("amount", 0.0) or 0.0)
-        item = dict(item)  # shallow copy
-        
-        if item_amount <= 0:
-            grossed_up.append(item)
-            continue
-            
-        valid_count += 1
-        
-        if valid_count == num_valid:
-            # Last valid line — swallow any rounding remainder cents
-            tax_portion = round(rcm_amt - distributed_total, 2)
+    for rank, (idx, item_amount) in enumerate(valid_lines):
+        item = dict(grossed_up[idx])  # copy the dict so we don't mutate in place
+
+        if rank == num_valid - 1:
+            # Last line: absorb any rounding remainder so totals reconcile exactly
+            tax_portion = round(rcm_amt - distributed_tax, 2)
         else:
-            tax_portion = per_line_tax
-            
+            tax_portion = round(item_amount * tax_rate, 2)
+
         new_amount = round(item_amount + tax_portion, 2)
-        distributed_total += tax_portion
+        distributed_tax += tax_portion
+
+        print(
+            f"[VAT]   Line {idx + 1}: pre-tax={item_amount} "
+            f"+ tax={tax_portion} ({rcm_pct}%) = gross={new_amount}"
+        )
 
         item["amount"] = new_amount
-        item["_pre_tax_amount"] = item_amount  # keep for debugging
-        grossed_up.append(item)
+        item["_pre_tax_amount"] = item_amount  # preserved for audit / mismatch check
+        item["_tax_portion"] = tax_portion
+        grossed_up[idx] = item
 
+    print(f"[VAT] Total distributed tax: {round(distributed_tax, 2)} (target: {rcm_amt})")
     return grossed_up
 
 

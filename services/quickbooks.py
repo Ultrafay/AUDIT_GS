@@ -778,53 +778,87 @@ class QuickBooksService:
         print(f"[QBO] Warning: No fallback rate for {currency_code}. Defaulting to 1.0.")
         return 1.0
 
-    def create_rcm_journal_entry(self, bill_id: str, tax_amount_aed: float, txn_date: str) -> bool:
+    def create_rcm_journal_entry(
+        self,
+        bill_id: str,
+        tax_amount_aed: float,
+        txn_date: str,
+        tax_percentage: float = 0.0,
+        subtotal_aed: float = 0.0,
+    ) -> bool:
         """
         Create a Journal Entry for Reverse Charge Mechanism.
-        Debits "Input VAT - RCM" and Credits "Output VAT - RCM" using the exact provided tax amount.
+
+        Debits  "Input VAT - RCM"  (recoverable input tax)
+        Credits "Output VAT - RCM" (liability that mirrors the charge)
+
+        Uses the ACTUAL tax amount from the invoice — not a hardcoded rate.
+        tax_percentage and subtotal_aed are used only for the audit description.
         """
         rcm_amount = round(tax_amount_aed, 2)
+
         if rcm_amount <= 0:
-            print(f"[QBO] RCM calculated as 0 for Bill {bill_id} — still creating zero-value journal entry per spec.")
-            
-        print(f"[QBO] Creating RCM Journal Entry for Bill {bill_id} — VAT Amount: {rcm_amount} AED")
-        
-        # We search broadly since we don't know the exact AccountType they chose
-        input_vat = self._get_account_by_name("Input VAT - RCM")
-        output_vat = self._get_account_by_name("Output VAT - RCM")
-        
-        if not input_vat or not output_vat:
-            print("[QBO] Warning: Could not find 'Input VAT - RCM' or 'Output VAT - RCM' accounts. RCM Journal Entry aborted.")
+            print(f"[QBO] RCM amount is 0 for Bill {bill_id} — skipping journal entry.")
             return False
-            
+
+        rate_label = f"{tax_percentage:.2f}%" if tax_percentage else "unknown rate"
+        subtotal_label = f" on subtotal {subtotal_aed:.2f} AED" if subtotal_aed else ""
+        private_note = (
+            f"RCM Auto-Entry for Bill ID: {bill_id} | "
+            f"Tax: {rcm_amount:.2f} AED @ {rate_label}{subtotal_label}"
+        )
+
+        print(
+            f"[QBO] Creating RCM Journal Entry for Bill {bill_id} — "
+            f"VAT Amount: {rcm_amount} AED @ {rate_label}"
+        )
+
+        # Search broadly — account type may vary (Liability, Tax, etc.)
+        input_vat  = self._get_account_by_name("Input VAT - RCM")
+        output_vat = self._get_account_by_name("Output VAT - RCM")
+
+        if not input_vat or not output_vat:
+            print(
+                "[QBO] Warning: Could not find 'Input VAT - RCM' or "
+                "'Output VAT - RCM' accounts. RCM Journal Entry aborted."
+            )
+            return False
+
+        line_desc_input  = (
+            f"Input VAT — Reverse Charge @ {rate_label} on Bill {bill_id}"
+        )
+        line_desc_output = (
+            f"Output VAT — Reverse Charge @ {rate_label} on Bill {bill_id}"
+        )
+
         payload = {
-            "TxnDate": txn_date,
-            "PrivateNote": f"RCM Auto-Entry for Bill ID: {bill_id}",
+            "TxnDate":    txn_date,
+            "PrivateNote": private_note[:4000],
             "CurrencyRef": {"value": "AED"},
             "Line": [
                 {
-                    "Id": "0",
-                    "Description": f"Input VAT for Reverse Charge on Bill {bill_id}",
-                    "Amount": rcm_amount,
-                    "DetailType": "JournalEntryLineDetail",
+                    "Id":          "0",
+                    "Description": line_desc_input,
+                    "Amount":      rcm_amount,
+                    "DetailType":  "JournalEntryLineDetail",
                     "JournalEntryLineDetail": {
                         "PostingType": "Debit",
-                        "AccountRef": input_vat
-                    }
+                        "AccountRef":  input_vat,
+                    },
                 },
                 {
-                    "Id": "1",
-                    "Description": f"Output VAT for Reverse Charge on Bill {bill_id}",
-                    "Amount": rcm_amount,
-                    "DetailType": "JournalEntryLineDetail",
+                    "Id":          "1",
+                    "Description": line_desc_output,
+                    "Amount":      rcm_amount,
+                    "DetailType":  "JournalEntryLineDetail",
                     "JournalEntryLineDetail": {
                         "PostingType": "Credit",
-                        "AccountRef": output_vat
-                    }
-                }
-            ]
+                        "AccountRef":  output_vat,
+                    },
+                },
+            ],
         }
-        
+
         try:
             resp = self._request("POST", "journalentry", json=payload)
             if resp.status_code in (200, 201):
@@ -998,13 +1032,28 @@ class QuickBooksService:
                 bill_id = str(bill.get("Id", ""))
                 print(f"[QBO] Success: Bill posted — ID: {bill_id}")
 
-                # RCM Journal Entry — only for Foreign vendors when NOT using
-                # TaxInclusive mode (TaxInclusive + RC codes makes QBO handle
-                # RCM automatically).
+                # RCM Journal Entry — always post for Foreign vendors when
+                # there is actual RCM tax, regardless of TaxInclusive mode.
+                # TaxInclusive controls how QBO handles the bill lines; the
+                # explicit Input/Output VAT journal entry is always our
+                # responsibility to record the VAT liability correctly.
                 location_cat = invoice_data.get("supplier_location_category", "Unknown")
-                if location_cat == "Foreign" and not invoice_data.get("tax_inclusive"):
-                    rcm_aed = invoice_data.get("rcm_tax_amount", 0.0) * exchange_rate
-                    self.create_rcm_journal_entry(bill_id, rcm_aed, txn_date)
+                rcm_tax_amt  = float(invoice_data.get("rcm_tax_amount", 0.0) or 0.0)
+                if location_cat == "Foreign" and rcm_tax_amt > 0:
+                    rcm_aed      = rcm_tax_amt * exchange_rate
+                    rcm_pct      = float(invoice_data.get("rcm_tax_percentage", 0.0) or 0.0)
+                    # subtotal in AED for the audit description
+                    subtotal_inv = sum(
+                        float(li.get("_pre_tax_amount", li.get("amount", 0.0)) or 0.0)
+                        for li in invoice_data.get("line_items", [])
+                    ) * exchange_rate
+                    self.create_rcm_journal_entry(
+                        bill_id,
+                        rcm_aed,
+                        txn_date,
+                        tax_percentage=rcm_pct,
+                        subtotal_aed=round(subtotal_inv, 2),
+                    )
 
                 return "posted", bill_id
             else:

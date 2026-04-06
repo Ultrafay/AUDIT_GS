@@ -29,6 +29,7 @@ class GoogleSheetsService:
         "Exclusive Amount",
         "VAT Amount",
         "Invoice Total", # Changed from Total Amount
+        "Tax %",         # New: Explicit tax percentage
         "Currency",
         "Confidence",
         "Status",
@@ -122,6 +123,7 @@ class GoogleSheetsService:
                     invoice_data.get('exclusive_amount', 0.0),  # Exclusive Amount
                     invoice_data.get('vat_amount', 0.0),        # VAT Amount
                     invoice_data.get('total_amount', 0.0),      # Invoice Total
+                    invoice_data.get('invoice_tax_percentage'), # Tax %
                     invoice_data.get('currency', 'AED'),        # Currency
                     invoice_data.get('extraction_confidence', 'medium'), # Confidence
                     "Pending Review",                           # Status

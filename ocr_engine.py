@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 
 # Import New Services
 from services.openai_extractor import OpenAIExtractor, InvoiceData
+from services.gemini_extractor import GeminiExtractor
 from services.sheets_service import GoogleSheetsService
 from utils.credentials_helper import get_credentials_path
 
@@ -32,17 +33,26 @@ load_dotenv()
 extractor = None
 sheets = None
 try:
-    extractor = OpenAIExtractor(
-        api_key=os.getenv("OPENAI_API_KEY"),
-        org_id=os.getenv("OPENAI_ORG_ID"),
-        project_id=os.getenv("OPENAI_PROJECT_ID")
-    )
+    openai_key = os.getenv("OPENAI_API_KEY")
+    gemini_key = os.getenv("GEMINI_API_KEY")
+
+    if openai_key:
+        extractor = OpenAIExtractor(
+            api_key=openai_key,
+            org_id=os.getenv("OPENAI_ORG_ID"),
+            project_id=os.getenv("OPENAI_PROJECT_ID")
+        )
+        print("OpenAI Extractor initialized.")
+    elif gemini_key:
+        extractor = GeminiExtractor(api_key=gemini_key)
+        print("Gemini Extractor initialized.")
+    
     creds_path = get_credentials_path()
     sheets = GoogleSheetsService(
         credentials_path=creds_path,
         spreadsheet_id=os.getenv("GOOGLE_SHEET_ID")
     )
-    print("Services initialized successfully.")
+    print("Sheets service initialized.")
 except Exception as e:
     print(f"Warning: Failed to initialize new services: {e}")
     extractor = None
@@ -86,10 +96,10 @@ def process_invoice(file_path: Path, file_id: str):
     print(f"Processing {file_path} with ID {file_id}")
     filename = file_path.name
     
-    # 1. Try OpenAI Extraction (Primary)
-    if os.getenv("USE_OPENAI", "true").lower() == "true" and extractor:
+    # 1. Try AI Extraction (Primary)
+    if os.getenv("USE_AI_EXTRACTION", "true").lower() == "true" and extractor:
         try:
-            print("Attempting OpenAI GPT-4o Extraction...")
+            print(f"Attempting {type(extractor).__name__} Extraction...")
             if filename.lower().endswith(".pdf"):
                 result_data = extractor.extract_from_pdf(str(file_path))
             else:

@@ -1,6 +1,6 @@
 pdf2image
 pytesseract
-opencv-python>=4.2.0
+opencv-python-headless>=4.2.0
 numpy
 xlsxwriter
 openai

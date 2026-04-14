@@ -24,19 +24,9 @@
         .key { font-weight: bold; color: #555; }
         .value { color: #000; }
         .error { color: red; margin-top: 10px; }
-        .status-bar { display: flex; justify-content: space-between; align-items: center; background: #fff; padding: 10px 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-        .status-connected { color: #4CAF50; font-weight: bold; }
-        .status-disconnected { color: #f44336; font-weight: bold; }
-        .btn-small { padding: 5px 10px; font-size: 14px; margin-left: 10px; }
-        .btn-disconnect { background-color: #f44336; }
-        .btn-disconnect:hover { background-color: #d32f2f; }
     </style>
 </head>
 <body>
-    <div class="status-bar" id="qboStatus">
-        <div>QuickBooks: <span id="qboStatusText" class="status-disconnected">Checking...</span></div>
-        <div id="qboActions"></div>
-    </div>
     <h1>Invoice OCR Extraction</h1>
     
     <div class="container">
@@ -59,42 +49,6 @@
     </div>
 
     <script>
-        window.onload = checkQboStatus;
-
-        async function checkQboStatus() {
-            const statusText = document.getElementById('qboStatusText');
-            const actions = document.getElementById('qboActions');
-            try {
-                const response = await fetch('/api/qbo/status');
-                const data = await response.json();
-                
-                if (data.connected) {
-                    statusText.innerText = `Connected (${data.company})`;
-                    statusText.className = 'status-connected';
-                    actions.innerHTML = `<button class="btn-small btn-disconnect" onclick="disconnectQbo()">Disconnect</button>`;
-                } else {
-                    statusText.innerText = 'Disconnected';
-                    statusText.className = 'status-disconnected';
-                    actions.innerHTML = `<button class="btn-small" onclick="window.location.href='/auth/quickbooks/connect'">Connect to QuickBooks</button>`;
-                }
-            } catch (e) {
-                statusText.innerText = 'Error checking status';
-            }
-        }
-
-        async function disconnectQbo() {
-            if (!confirm("Are you sure you want to disconnect from QuickBooks?")) return;
-            try {
-                const response = await fetch('/auth/quickbooks/disconnect', { method: 'POST' });
-                if (response.ok) {
-                    alert("Disconnected successfully");
-                    checkQboStatus();
-                }
-            } catch (e) {
-                alert("Failed to disconnect");
-            }
-        }
-
         async function uploadFile() {
             const fileInput = document.getElementById('fileInput');
             const file = fileInput.files[0];

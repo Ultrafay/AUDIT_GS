@@ -20,14 +20,6 @@ from services.openai_extractor import OpenAIExtractor
 from services.sheets_service import GoogleSheetsService
 from utils.credentials_helper import get_credentials_path
 
-# QBO integration (imported lazily so missing deps don't break the rest)
-try:
-    from services.quickbooks import QuickBooksService
-    _qbo_available = True
-except ImportError:
-    _qbo_available = False
-
-
 class DriveProcessor:
     def __init__(self):
         self.poll_interval = int(os.getenv("DRIVE_POLL_INTERVAL", "10"))
@@ -58,51 +50,7 @@ class DriveProcessor:
             credentials_path=creds_path,
             spreadsheet_id=os.getenv("GOOGLE_SHEET_ID")
         )
-
-        # GL Classifier — sheet-driven per-line classification
-        self.gl_classifier = None
-        _gl_sheet_id = os.getenv("GL_MAPPING_SHEET_ID", "")
-        if _gl_sheet_id:
-            try:
-                from services.gl_classifier import GLClassifier
-                self.gl_classifier = GLClassifier(self.sheets, _gl_sheet_id)
-                self.gl_classifier.load_mapping()
-                print("[DriveProcessor] GL Classifier initialised.")
-            except Exception as _gl_err:
-                print(f"[DriveProcessor] GL Classifier init failed: {_gl_err}")
-        else:
-            print("[DriveProcessor] GL_MAPPING_SHEET_ID not set — GL Classifier disabled.")
-
         self.folder_id = folder_id
-
-        # Initialize QuickBooks (optional — only if credentials are configured)
-        self.qbo = None
-        if _qbo_available and os.getenv("QBO_REALM_ID") and os.getenv("AUTO_PUSH_TO_QBO", "true").lower() == "true":
-            try:
-                self.qbo = QuickBooksService()
-                print("[DriveProcessor] QuickBooks integration enabled.")
-            except Exception as qbo_err:
-                print(f"[DriveProcessor] QuickBooks init failed (continuing without QBO): {qbo_err}")
-        else:
-            print(f"[DriveProcessor] QBO Skipped -> available:{_qbo_available}, realm:{os.getenv('QBO_REALM_ID')}, auto_push:{os.getenv('AUTO_PUSH_TO_QBO')}")
-
-        # Inject chart of accounts into GPT-4o prompt
-        if self.qbo and self.extractor:
-            try:
-                account_names = self.qbo.get_all_account_names()
-                if account_names:
-                    self.extractor.set_chart_of_accounts(account_names)
-            except Exception as _coa_err:
-                print(f"[DriveProcessor] Could not load chart of accounts: {_coa_err}")
-
-        # Wire GL Classifier into QBO + run startup CoA validation
-        if self.gl_classifier and self.qbo:
-            self.qbo.gl_classifier = self.gl_classifier
-            try:
-                account_names = self.qbo.get_all_account_names()
-                self.gl_classifier.validate_against_accounts(account_names)
-            except Exception as _val_err:
-                print(f"[DriveProcessor] GL CoA validation failed: {_val_err}")
 
         print(f"[DriveProcessor] Initialized. Watching folder: {folder_id}")
 
@@ -193,10 +141,11 @@ class DriveProcessor:
             print(f"[DriveProcessor]   Downloaded to {tmp_path}")
 
             # 2. Extract via OpenAI
+            # Passing 'sales_invoice' as a default doc_type, pending multi-folder routing update.
             if file_name.lower().endswith(".pdf"):
-                result = self.extractor.extract_from_pdf(tmp_path)
+                result = self.extractor.extract_from_pdf(tmp_path, doc_type="sales_invoice")
             else:
-                result = self.extractor.extract_from_image(tmp_path)
+                result = self.extractor.extract_from_image(tmp_path, doc_type="sales_invoice")
             
             print(f"[DriveProcessor]   Extracted: {result.supplier_name} / {result.invoice_number}")
 
@@ -214,26 +163,7 @@ class DriveProcessor:
             self.sheets.append_invoice(result.dict(), internal_id, file_name)
             print(f"[DriveProcessor]   Pushed to Google Sheets")
 
-            # 5. Post to QuickBooks
-            print(f"[DEBUG] QBO Enabled: {self.qbo is not None} | Invoice Data: {result.dict()}")
-            if self.qbo:
-                try:
-                    invoice_dict = result.dict()
-                    invoice_dict["file_id"] = internal_id  # pass through for PrivateNote
-
-                    # ── VAT Processing (per-line tax codes + foreign tax) ──
-                    from services.vat_processor import process_vat
-                    invoice_dict = process_vat(invoice_dict)
-                    # ── End VAT Processing ───────────────────────────
-
-                    qbo_status, qbo_bill_id = self.qbo.sync(invoice_dict, tmp_path)
-                    self.sheets.update_qbo_status(internal_id, qbo_status, qbo_bill_id)
-                    print(f"[DriveProcessor]   QBO: {qbo_status} (bill_id={qbo_bill_id})")
-                except Exception as qbo_err:
-                    print(f"[DriveProcessor]   QBO sync error (non-fatal): {qbo_err}")
-                    self.sheets.update_qbo_status(internal_id, "failed", "")
-
-            # 6. Move to Processed
+            # 5. Move to Processed
             self.drive.move_to_processed(file_id)
             print(f"[DriveProcessor]   ✓ Moved to Processed")
 

@@ -118,7 +118,19 @@ Extract the following fields:
 Key distinction: a GDN evidences physical delivery. If the document shows prices and totals but no delivery acknowledgement, it is probably an invoice, not a GDN — flag it as DOCUMENT_TYPE_MISMATCH.
 """
 
-CLASSIFY_PROMPT = """Classify this document. Return JSON {"type": "sales_order" | "sales_invoice" | "gdn" | "unknown", "confidence": "high" | "medium" | "low"}. Return "unknown" if you cannot tell, or if confidence is low. Better unknown than wrong."""
+CLASSIFY_PROMPT = """You are a document classifier for an audit pipeline. Your ONLY job is to identify the document type. You are NOT extracting data.
+
+Respond with JSON in this exact shape:
+{"type": "sales_order" | "sales_invoice" | "gdn" | "unknown", "confidence": "high" | "medium" | "low"}
+
+Definitions:
+- sales_order: a document confirming a customer order before delivery (titles like "Sales Order", "Purchase Order", "Order Confirmation"). Usually has prices but no delivery acknowledgement and no payment terms.
+- sales_invoice: a bill issued to a customer for goods/services (titles like "Invoice", "Tax Invoice", "Bill"). Has prices, taxes, and payment terms.
+- gdn: a Goods Delivery Note / Delivery Note / Dispatch Note / Delivery Challan. Evidences physical delivery. Usually has quantities but NO prices.
+
+Return "unknown" if you cannot tell with confidence, or if the document is something else entirely (purchase invoice, payment receipt, contract, etc.). Better unknown than wrong.
+
+DO NOT extract any other fields. DO NOT return company names, addresses, line items, totals, or any other data. ONLY return the two fields: type and confidence."""
 
 
 # --- Extractor Class ---
@@ -153,7 +165,13 @@ class OpenAIExtractor:
         }
         return mime_map.get(ext, "image/jpeg")
 
-    def _call_openai(self, image_path: str, system_prompt: str, schema_class: Type[BaseModel]) -> BaseModel:
+    def _call_openai(
+        self,
+        image_path: str,
+        system_prompt: str,
+        schema_class: Type[BaseModel],
+        user_message: str = "Extract all relevant data from this structured document into JSON.",
+    ) -> BaseModel:
         b64_image = self._encode_image_to_base64(image_path)
         mime_type = self._get_mime_type(image_path)
         
@@ -167,7 +185,7 @@ class OpenAIExtractor:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Extract all relevant data from this structured document into JSON."},
+                        {"type": "text", "text": user_message},
                         {
                             "type": "image_url",
                             "image_url": {
@@ -200,10 +218,22 @@ class OpenAIExtractor:
             print(f"Raw response: {response_text}")
             raise ValueError(f"Failed to parse JSON from OpenAI response: {e}")
 
-    def _extract_from_image(self, image_path: str, system_prompt: str, schema_class: Type[BaseModel]) -> BaseModel:
-        return self._call_openai(image_path, system_prompt, schema_class)
+    def _extract_from_image(
+        self,
+        image_path: str,
+        system_prompt: str,
+        schema_class: Type[BaseModel],
+        user_message: str = "Extract all relevant data from this structured document into JSON.",
+    ) -> BaseModel:
+        return self._call_openai(image_path, system_prompt, schema_class, user_message=user_message)
 
-    def _extract_from_pdf(self, pdf_path: str, system_prompt: str, schema_class: Type[BaseModel]) -> BaseModel:
+    def _extract_from_pdf(
+        self,
+        pdf_path: str,
+        system_prompt: str,
+        schema_class: Type[BaseModel],
+        user_message: str = "Extract all relevant data from this structured document into JSON.",
+    ) -> BaseModel:
         from pdf2image import convert_from_path
         
         # Convert first page of PDF to image
@@ -218,7 +248,7 @@ class OpenAIExtractor:
             tmp_path = tmp.name
         
         try:
-            result = self._call_openai(tmp_path, system_prompt, schema_class)
+            result = self._call_openai(tmp_path, system_prompt, schema_class, user_message=user_message)
         finally:
             os.unlink(tmp_path)
             
@@ -273,10 +303,23 @@ class OpenAIExtractor:
         filename = Path(file_path).name
         print(f"[OpenAIExtractor] Classifying {filename}")
 
+        classify_user_message = (
+            "Classify this document. You are NOT extracting any data — only identifying "
+            "the document type. Respond ONLY with the JSON schema provided "
+            '{"type": "sales_order" | "sales_invoice" | "gdn" | "unknown", '
+            '"confidence": "high" | "medium" | "low"}. Do not include any other fields.'
+        )
+
         if str(file_path).lower().endswith(".pdf"):
-            result = self._extract_from_pdf(file_path, CLASSIFY_PROMPT, DocumentClassification)
+            result = self._extract_from_pdf(
+                file_path, CLASSIFY_PROMPT, DocumentClassification,
+                user_message=classify_user_message,
+            )
         else:
-            result = self._extract_from_image(file_path, CLASSIFY_PROMPT, DocumentClassification)
+            result = self._extract_from_image(
+                file_path, CLASSIFY_PROMPT, DocumentClassification,
+                user_message=classify_user_message,
+            )
 
         classification = result.model_dump()
         print(f"[OpenAIExtractor] Classification: {classification}")

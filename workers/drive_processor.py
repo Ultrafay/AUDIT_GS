@@ -146,26 +146,26 @@ class DriveProcessor:
 
     def _process_file(self, file_info: dict):
         """Full processing flow: parse filename → classify → extract → route."""
-        file_id = file_info['id']
+        drive_file_id = file_info['id']   # Drive's own file identifier — used for dedup, download, and move
         file_name = file_info['name']
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         print(f"[DriveProcessor] [{timestamp}] Processing: {file_name}")
 
         # Always mark as seen to avoid re-processing
-        self._processed_ids.add(file_id)
+        self._processed_ids.add(drive_file_id)
 
         # ── Step 1: Parse sample number from filename ──
         sample_number = self._parse_sample_number(file_name)
         if sample_number is None:
             print(f"[DriveProcessor]   ✗ Invalid filename: {file_name}")
             self._log_failure(
-                file_id=file_id,
+                file_id=str(uuid.uuid4()),
                 filename=file_name,
                 doc_type="unknown",
                 error_message="invalid_filename"
             )
-            self._move_file(file_id, self.folder_failed_unclassified)
+            self._move_file(drive_file_id, self.folder_failed_unclassified)
             self._stats["files_failed"] += 1
             return
 
@@ -175,7 +175,7 @@ class DriveProcessor:
         os.close(tmp_fd)
 
         try:
-            self._download_file(file_id, tmp_path)
+            self._download_file(drive_file_id, tmp_path)
             print(f"[DriveProcessor]   Downloaded to temp")
 
             # ── Step 3: Classify document ──
@@ -185,12 +185,12 @@ class DriveProcessor:
                 print(f"[DriveProcessor]   ✗ Classification failed: {e}")
                 traceback.print_exc()
                 self._log_failure(
-                    file_id=file_id,
+                    file_id=str(uuid.uuid4()),
                     filename=file_name,
                     doc_type="unknown",
                     error_message=f"classification_error: {e}"
                 )
-                self._move_file(file_id, self.folder_failed_unclassified)
+                self._move_file(drive_file_id, self.folder_failed_unclassified)
                 self._stats["files_failed"] += 1
                 return
 
@@ -200,22 +200,24 @@ class DriveProcessor:
             if doc_type == "unknown" or confidence == "low":
                 print(f"[DriveProcessor]   ✗ Unclassified (type={doc_type}, confidence={confidence})")
                 self._log_failure(
-                    file_id=file_id,
+                    file_id=str(uuid.uuid4()),
                     filename=file_name,
                     doc_type=doc_type,
                     error_message=f"unclassified: type={doc_type}, confidence={confidence}"
                 )
-                self._move_file(file_id, self.folder_failed_unclassified)
+                self._move_file(drive_file_id, self.folder_failed_unclassified)
                 self._stats["files_failed"] += 1
                 return
 
             print(f"[DriveProcessor]   Classified as {doc_type} (confidence={confidence})")
 
             # ── Step 4: Extract + write to working paper ──
+            # Generate a fresh UUID per extraction attempt, matching the API endpoint's pattern.
+            extraction_file_id = str(uuid.uuid4())
             try:
                 result = ocr_engine.process_document(
                     file_path=Path(tmp_path),
-                    file_id=file_id,
+                    file_id=extraction_file_id,
                     doc_type=doc_type,
                     sample_number=sample_number,
                 )
@@ -223,21 +225,21 @@ class DriveProcessor:
                 # Extraction crashed — process_document already logs to Extraction Log
                 print(f"[DriveProcessor]   ✗ Extraction failed: {e}")
                 traceback.print_exc()
-                self._move_file(file_id, self.folder_failed_extraction)
+                self._move_file(drive_file_id, self.folder_failed_extraction)
                 self._stats["files_failed"] += 1
                 return
 
             # ── Step 5: Check sheet write result and route file ──
             if not result.get("sheet_write_success", False):
                 print(f"[DriveProcessor]   ✗ Sheet write failed")
-                self._move_file(file_id, self.folder_failed_sheet_write)
+                self._move_file(drive_file_id, self.folder_failed_sheet_write)
                 self._stats["files_failed"] += 1
                 return
 
             # Success — move to the correct processed folder
             target_folder = self.processed_folders.get(doc_type)
             if target_folder:
-                self._move_file(file_id, target_folder)
+                self._move_file(drive_file_id, target_folder)
                 print(f"[DriveProcessor]   ✓ Done → processed/{doc_type}")
             else:
                 print(f"[DriveProcessor]   ⚠ No processed folder for {doc_type}, leaving in inbox")

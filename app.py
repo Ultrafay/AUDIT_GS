@@ -23,7 +23,7 @@ async def lifespan(app: FastAPI):
     """Start Drive watcher on startup, stop on shutdown."""
     global drive_processor
     
-    folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
+    folder_id = os.getenv("DRIVE_FOLDER_INBOX")
     if folder_id:
         try:
             from workers.drive_processor import DriveProcessor
@@ -35,7 +35,7 @@ async def lifespan(app: FastAPI):
             traceback.print_exc()
             drive_processor = None
     else:
-        print("[App] GOOGLE_DRIVE_FOLDER_ID not set — Drive watcher disabled")
+        print("[App] DRIVE_FOLDER_INBOX not set — Drive watcher disabled")
     
     yield  # App is running
     
@@ -134,7 +134,7 @@ async def drive_watcher_status():
     if not drive_processor:
         return JSONResponse(content={
             "is_running": False,
-            "message": "Drive watcher not configured. Set GOOGLE_DRIVE_FOLDER_ID in .env"
+            "message": "Drive watcher not configured. Set DRIVE_FOLDER_INBOX in .env"
         })
     return JSONResponse(content=drive_processor.get_status())
 

@@ -52,6 +52,10 @@ class GDNData(BaseModel):
     total_quantity_delivered: Optional[float] = None
     notes: Optional[str] = None
 
+class DocumentClassification(BaseModel):
+    type: str       # "sales_order" | "sales_invoice" | "gdn" | "unknown"
+    confidence: str  # "high" | "medium" | "low"
+
 
 # --- Prompts ---
 
@@ -113,6 +117,8 @@ Extract the following fields:
 
 Key distinction: a GDN evidences physical delivery. If the document shows prices and totals but no delivery acknowledgement, it is probably an invoice, not a GDN — flag it as DOCUMENT_TYPE_MISMATCH.
 """
+
+CLASSIFY_PROMPT = """Classify this document. Return JSON {"type": "sales_order" | "sales_invoice" | "gdn" | "unknown", "confidence": "high" | "medium" | "low"}. Return "unknown" if you cannot tell, or if confidence is low. Better unknown than wrong."""
 
 
 # --- Extractor Class ---
@@ -251,3 +257,28 @@ class OpenAIExtractor:
             return self._extract_from_pdf(file_path, system_prompt, schema_class)
         else:
             return self._extract_from_image(file_path, system_prompt, schema_class)
+
+    def classify_document(self, file_path: str) -> dict:
+        """
+        Classify a document as sales_order, sales_invoice, gdn, or unknown.
+        This is a lightweight, separate OpenAI call — not the full extraction.
+
+        Args:
+            file_path: path to PDF or image
+
+        Returns:
+            dict with keys "type" and "confidence"
+            e.g. {"type": "sales_invoice", "confidence": "high"}
+        """
+        filename = Path(file_path).name
+        print(f"[OpenAIExtractor] Classifying {filename}")
+
+        if str(file_path).lower().endswith(".pdf"):
+            result = self._extract_from_pdf(file_path, CLASSIFY_PROMPT, DocumentClassification)
+        else:
+            result = self._extract_from_image(file_path, CLASSIFY_PROMPT, DocumentClassification)
+
+        classification = result.model_dump()
+        print(f"[OpenAIExtractor] Classification: {classification}")
+        return classification
+

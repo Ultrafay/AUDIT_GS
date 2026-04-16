@@ -329,7 +329,7 @@ class DriveProcessor:
                 target_tab="O A C",
                 target_row=0,
                 status="failed",
-                model_used="gpt-4o",
+                model_used=ocr_engine.extractor.model if ocr_engine.extractor else "gpt-4o",
                 duration_ms=0,
                 error_message=error_message,
             )

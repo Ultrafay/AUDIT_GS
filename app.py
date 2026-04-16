@@ -1,17 +1,12 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Form, Path as FastPath
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
+from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 import uvicorn
 import shutil
 import os
 import uuid
-import base64
-import requests as http_requests
 from pathlib import Path
 import ocr_engine
-from typing import Optional
-from dotenv import set_key
 from fastapi.middleware.cors import CORSMiddleware
 
 # ── Drive Processor (lazy init) ──────────────────────────────
@@ -58,52 +53,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount static files
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
 # Create directories if they don't exist
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
-
-@app.get("/")
-async def read_index():
-    return JSONResponse(content={"message": "Go to /static/index.html for the UI"})
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint for Railway deployment"""
-    return JSONResponse(status_code=200, content={"status": "ok"})
-
-@app.get("/launch", response_class=HTMLResponse)
-async def launch_page():
-    """Landing page"""
-    html_content = """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Launch - ATH by Solvevia</title>
-        <style>
-            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f3f4f6; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-            .card { background: white; padding: 2.5rem; border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); text-align: center; max-width: 450px; width: 100%; }
-            h1 { color: #111827; margin-bottom: 0.5rem; font-size: 1.8rem; }
-            p { color: #6b7280; margin-bottom: 2rem; }
-            .btn { display: inline-block; background-color: #2563eb; color: white; padding: 0.75rem 2rem; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 1.1rem; transition: background-color 0.2s, transform 0.1s; border: none; cursor: pointer; }
-            .btn:hover { background-color: #1d4ed8; }
-            .btn:active { transform: scale(0.98); }
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            <h1>Welcome to ATH</h1>
-            <p>Powered by Solvevia</p>
-            <a href="/static/index.html" class="btn">Go to Dashboard</a>
-        </div>
-    </body>
-    </html>
-    """
-    return HTMLResponse(content=html_content)
 
 @app.post("/api/extract/{doc_type}")
 async def extract_document(

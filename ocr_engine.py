@@ -68,7 +68,7 @@ def process_document(
             target_tab=target_tab,
             target_row=target_row,
             status="success",
-            model_used="gpt-4o",
+            model_used=extractor.model,
             duration_ms=duration_ms
         )
         
@@ -92,7 +92,7 @@ def process_document(
                 target_tab=target_tab,
                 target_row=target_row,
                 status="failed",
-                model_used="gpt-4o",
+                model_used=extractor.model,
                 duration_ms=duration_ms,
                 error_message=error_msg
             )

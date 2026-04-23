@@ -26,6 +26,7 @@ def populate_template(
     invoices: list[SalesInvoiceData],
     gdns: list[GDNData],
 ) -> bytes:
+    print("[ExcelExport] === populate_template v2 (multi-line fix) called ===")
     template_path = "templates/revenue_audit_3tab.xlsx"
     wb = load_workbook(template_path)
     

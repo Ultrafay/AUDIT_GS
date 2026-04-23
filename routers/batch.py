@@ -1,5 +1,6 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
+from typing import List
 import io
 import os
 import shutil
@@ -16,7 +17,7 @@ UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 @router.post("/batch/extract")
-async def batch_extract(files: list[UploadFile] = File(...)):
+async def batch_extract(files: List[UploadFile] = File(...)):
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
 
